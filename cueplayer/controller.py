@@ -22,12 +22,18 @@ class PlayError(Exception):
     pass
 
 
+class Blocked(PlayError):
+    """A locked scenario (e.g. fire alarm) is on screen and the trigger may not replace it."""
+
+
 class Controller:
     def __init__(self, settings: Settings, library: Library, force_mock: bool = False):
         self.settings = settings
         self.library = library
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.engine: BaseEngine = create_engine(self._engine_event_threadsafe, force_mock)
+        from .transcode import Transcoder
+        self.transcoder = Transcoder(library, settings.get)
         self.listeners: List[Callable[[Dict[str, Any]], None]] = []
         self._timer: Optional[asyncio.TimerHandle] = None
         self._default_idx = -1
@@ -40,12 +46,16 @@ class Controller:
         self.engine.start(self.settings.get())
         # The engine emits engine_started; the default content starts then.
         asyncio.create_task(self._housekeeping())
+        # Check every file against this unit's hardware (also converts existing libraries)
+        self.loop.run_in_executor(None, self.transcoder.evaluate_all)
 
     def shutdown(self) -> None:
         self.engine.stop()
 
     def apply_settings(self, patch: Dict[str, Any]) -> Dict[str, Any]:
         changed = self.settings.update(patch)
+        if changed & {"output", "transcode"}:
+            self.loop.run_in_executor(None, self.transcoder.evaluate_all)
         if changed & set(PIPELINE_SECTIONS):
             log.info("rebuilding pipeline (changed: %s)", ", ".join(sorted(changed)))
             self.engine.rebuild(self.settings.get())
@@ -59,7 +69,7 @@ class Controller:
     def _blank_state(mode: str) -> Dict[str, Any]:
         return {"mode": mode, "media": None, "cue": None, "clip": None, "started": None,
                 "duration": None, "loop": False, "after": None, "transition_ms": None,
-                "queue": []}
+                "queue": [], "lock": False, "label": None}
 
     def status(self) -> Dict[str, Any]:
         s = dict(self.state)
@@ -89,17 +99,26 @@ class Controller:
         tr = self.settings.section("transition")
         return int(tr.get("duration_ms", 0)) if tr.get("type") == "fade" else 0
 
+    def _check_lock(self, lock: bool, force: bool) -> None:
+        """Locked scenarios stay up until cleared with Normal/Black, or replaced by another
+        locked scenario. force=True overrides (operators, internal sequencing)."""
+        if self.state.get("lock") and not lock and not force:
+            raise Blocked(f"blocked: '{self.state.get('label') or 'locked scenario'}' is active - "
+                          "send NORMAL to clear it (or add force=1)")
+
     def play(self, ref: Any, loop: bool = False, duration: Optional[float] = None,
              after: str = "default", transition_ms: Optional[int] = None,
              mode: str = "adhoc", cue: Optional[str] = None,
-             queue: Optional[List[str]] = None) -> Dict[str, Any]:
+             queue: Optional[List[str]] = None, lock: bool = False, force: bool = False,
+             label: Optional[str] = None) -> Dict[str, Any]:
         item = self.library.resolve(ref)
         if item is None:
             raise PlayError(f"media not found: {ref}")
+        self._check_lock(lock, force)
         self._cancel_timer()
         fade = self._fade(transition_ms)
         scale = item.get("scale_mode") or self.settings.section("output")["scale_mode"]
-        clip = self.engine.play(str(self.library.path_of(item)), item["kind"], scale, fade,
+        clip = self.engine.play(str(self.library.playable_path(item)), item["kind"], scale, fade,
                                 duration_hint=item.get("duration") or 0)
         if item["kind"] == "image" and not duration:
             # A lone looping/held image stays up until the next command;
@@ -111,7 +130,7 @@ class Controller:
             "media": {k: item.get(k) for k in ("id", "name", "kind", "category", "duration")},
             "duration": duration or (item.get("duration") if item["kind"] == "video" else None),
             "loop": loop, "after": after, "transition_ms": transition_ms,
-            "queue": list(queue or []),
+            "queue": list(queue or []), "lock": bool(lock), "label": label,
         }
         if duration:
             self._timer = self.loop.call_later(duration, self._on_finished, clip)
@@ -129,7 +148,8 @@ class Controller:
         if not items:
             raise PlayError(f"cue {cue['number']} has no media")
         opts = {"loop": cue["loop"], "duration": cue["duration"], "after": cue["after"],
-                "transition_ms": cue["transition_ms"]}
+                "transition_ms": cue["transition_ms"], "lock": cue.get("lock", False),
+                "label": cue.get("label") or None}
         opts.update({k: v for k, v in overrides.items() if v is not None})
         return self.play(items[0], mode="cue", cue=cue["number"], queue=items[1:], **opts)
 
@@ -159,10 +179,12 @@ class Controller:
             self._default_idx = (self._default_idx + 1) % len(ids)
         # A single default item loops; a playlist advances
         single = len(ids) == 1
+        # Returning to normal is how a locked scenario is cleared, so it always wins
         return self.play(ids[self._default_idx], mode="default", loop=single,
-                         after="default", transition_ms=transition_ms)
+                         after="default", transition_ms=transition_ms, force=True)
 
-    def next(self) -> Dict[str, Any]:
+    def next(self, force: bool = False) -> Dict[str, Any]:
+        self._check_lock(False, force)
         self._on_finished(self.state.get("clip"), forced=True)
         return self.status()
 
@@ -186,10 +208,8 @@ class Controller:
                 remaining = None
                 if self.state.get("duration") and self.state.get("started"):
                     remaining = max(1.0, self.state["duration"] - (time.time() - self.state["started"]))
-                self.play(m["id"], loop=self.state["loop"], after=self.state["after"],
-                          duration=remaining if m["kind"] == "image" else None,
-                          mode=self.state["mode"], cue=self.state["cue"],
-                          queue=self.state.get("queue"), transition_ms=0)
+                self._replay_current(transition_ms=0,
+                                     duration=remaining if m["kind"] == "image" else None)
         elif t == "clip_ended":
             if ev.get("clip") == self.state.get("clip"):
                 self._on_finished(ev["clip"])
@@ -197,7 +217,10 @@ class Controller:
             log.warning("clip %s failed: %s", ev.get("clip"), ev.get("error"))
             if ev.get("clip") == self.state.get("clip"):
                 self._notify_error(ev.get("error", "playback error"))
-                if self.state["mode"] == "default":
+                if self.state.get("lock"):
+                    # Never drop an emergency message because a file hiccuped: retry it
+                    self.loop.call_later(2, self._replay_current)
+                elif self.state["mode"] == "default":
                     self.loop.call_later(2, self._retry_default)
                 else:
                     self.play_default()
@@ -205,6 +228,19 @@ class Controller:
             self._notify_error(ev.get("error", "engine error"))
         elif t == "clip_started":
             self._notify("started")
+
+    def _replay_current(self, transition_ms: int = 0, duration: Optional[float] = None) -> None:
+        st = self.state
+        if not st.get("media"):
+            return
+        try:
+            self.play(st["media"]["id"], loop=st["loop"], after=st["after"], duration=duration,
+                      mode=st["mode"], cue=st["cue"], queue=st.get("queue"),
+                      transition_ms=transition_ms, lock=st.get("lock", False), force=True,
+                      label=st.get("label"))
+        except PlayError as e:
+            log.warning("could not resume %s: %s", st["media"].get("name"), e)
+            self.play_default()
 
     def _retry_default(self) -> None:
         if self.state["mode"] == "default":
@@ -241,12 +277,14 @@ class Controller:
                 queue.append(m["id"])
             self.play(nxt, loop=st["loop"], after=st["after"], mode=st["mode"], cue=st["cue"],
                       queue=queue, transition_ms=st["transition_ms"],
-                      duration=self._cue_duration(st))
+                      duration=self._cue_duration(st), lock=st.get("lock", False), force=True,
+                      label=st.get("label"))
             return
         if st["loop"] and not forced:
             # Gapless-ish restart of the same item
             self.play(m["id"], loop=True, after=st["after"], mode=st["mode"], cue=st["cue"],
-                      transition_ms=0, duration=self._cue_duration(st))
+                      transition_ms=0, duration=self._cue_duration(st),
+                      lock=st.get("lock", False), force=True, label=st.get("label"))
             return
         if st["mode"] == "default":
             self.play_default()
@@ -259,7 +297,7 @@ class Controller:
             self.black()
         elif after.startswith("cue:"):
             try:
-                self.play_cue(after[4:])
+                self.play_cue(after[4:], force=True)
             except PlayError as e:
                 log.warning("after-cue failed: %s", e)
                 self.play_default()

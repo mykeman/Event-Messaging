@@ -34,7 +34,7 @@ from .tcp_control import parse_opts, q, status_line
 
 log = logging.getLogger("cueplayer.master")
 
-ACTIONS = ("cue", "play", "stop", "default", "black", "next")
+ACTIONS = ("cue", "play", "stop", "default", "normal", "black", "next")
 MANAGED_TAG = "master"
 
 
@@ -435,6 +435,8 @@ def create_master_app(fleet: Fleet) -> FastAPI:
         t = p.get("transition", p.get("transition_ms"))
         if t not in (None, ""):
             o["transition_ms"] = as_int(t)
+        if "force" in p:
+            o["force"] = as_bool(p["force"])
         return o
 
     @app.api_route("/api/target/{target}/{action}", methods=["GET", "POST"], dependencies=[api])
@@ -478,6 +480,10 @@ def create_master_app(fleet: Fleet) -> FastAPI:
     @app.get("/api/cues", dependencies=[api])
     def cues():
         return lib.list_cues()
+
+    @app.post("/api/cues/scenarios", dependencies=[api])
+    def cues_add_scenarios():
+        return {"added": lib.add_standard_scenarios(), "cues": lib.list_cues()}
 
     @app.put("/api/cues/{number}", dependencies=[api])
     async def cue_set(number: str, request: Request):

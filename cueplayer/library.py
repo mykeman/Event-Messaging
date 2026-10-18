@@ -20,6 +20,22 @@ log = logging.getLogger("cueplayer.library")
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpg", ".mpeg", ".ts", ".mxf"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 CATEGORIES = ("library", "event")
+CUE_GROUPS = ("scenario", "event")
+
+# Standard situations every venue needs a message for. Seeded into a new unit's cue list
+# (media left empty for you to assign). Locked scenarios stay on screen until NORMAL is
+# sent and can't be replaced by ordinary triggers.
+STANDARD_SCENARIOS = [
+    ("101", "Venue at capacity", "#f59e0b", False),
+    ("102", "Entry closed - use other entrance", "#f59e0b", False),
+    ("103", "Event delayed", "#3d8bfd", False),
+    ("104", "Severe weather", "#f59e0b", False),
+    ("105", "Lost child - meeting point", "#3d8bfd", False),
+    ("106", "Medical emergency", "#ef4444", True),
+    ("107", "Fire alarm", "#ef4444", True),
+    ("108", "Evacuate now", "#ef4444", True),
+    ("109", "Shelter in place", "#ef4444", True),
+]
 AFTER_OPTIONS = ("default", "hold", "black")  # or "cue:<n>"
 
 
@@ -57,9 +73,25 @@ def probe(path: Path) -> Dict[str, Any]:
             capture_output=True, timeout=30, check=True).stdout
         info = json.loads(out)
         st = (info.get("streams") or [{}])[0]
-        dur = float(info.get("format", {}).get("duration") or st.get("duration") or 0)
+        fmt = info.get("format", {})
+        dur = float(fmt.get("duration") or st.get("duration") or 0)
+        fps = 0.0
+        for key in ("avg_frame_rate", "r_frame_rate"):
+            try:
+                n, d = (st.get(key) or "0/0").split("/")
+                if float(d):
+                    fps = float(n) / float(d)
+                    break
+            except ValueError:
+                pass
+        field = st.get("field_order") or ""
         return {"width": int(st.get("width") or 0), "height": int(st.get("height") or 0),
-                "duration": round(dur, 3), "codec": st.get("codec_name")}
+                "duration": round(dur, 3), "codec": st.get("codec_name"),
+                "pix_fmt": st.get("pix_fmt"), "profile": st.get("profile"),
+                "fps": round(fps, 3) if fps < 1000 else 0,
+                "bit_rate": int(st.get("bit_rate") or fmt.get("bit_rate") or 0),
+                "interlaced": field not in ("", "progressive", "unknown"),
+                "probed": True}
     except (subprocess.SubprocessError, ValueError, OSError) as e:
         log.warning("ffprobe failed for %s: %s", path, e)
         return {}
@@ -91,8 +123,11 @@ class Library:
         self.cues_path = self.dir / "cues.json"
         self._lock = threading.RLock()
         self.items: Dict[str, Dict[str, Any]] = self._load(self.index_path, {})
+        first_run = not self.cues_path.exists()
         self.cues: Dict[str, Dict[str, Any]] = self._load(self.cues_path, {})
         self._scan_orphans()
+        if first_run:
+            self.add_standard_scenarios()
 
     # ---- persistence ----------------------------------------------------------
     @staticmethod
@@ -114,12 +149,79 @@ class Library:
             gone = [k for k, v in self.items.items() if not (self.media_dir / v["filename"]).exists()]
             for k in gone:
                 del self.items[k]
-            if gone:
-                self._save()
+            for v in self.items.values():
+                pb = v.get("playback") or {}
+                if pb.get("file") and not (self.media_dir / pb["file"]).exists():
+                    v["playback"] = {}
+                elif pb.get("status") == "converting":
+                    pb["status"] = "queued"  # interrupted by a restart
+            self._save()
+            for f in self.media_dir.glob("*.play.part*"):
+                f.unlink(missing_ok=True)
 
     # ---- media ----------------------------------------------------------------
     def path_of(self, item: Dict[str, Any]) -> Path:
         return self.media_dir / item["filename"]
+
+    def playable_path(self, item: Dict[str, Any]) -> Path:
+        """The file to play: the converted playback copy when ready, else the original."""
+        pb = item.get("playback") or {}
+        if pb.get("status") == "ready" and pb.get("file"):
+            p = self.media_dir / pb["file"]
+            if p.exists():
+                return p
+        return self.path_of(item)
+
+    def reprobe(self, item_id: str) -> Dict[str, Any]:
+        with self._lock:
+            item = self.items.get(item_id)
+            if not item:
+                return {}
+            path = self.media_dir / item["filename"]
+        meta = probe(path) or {"probed": True}
+        with self._lock:
+            if item_id in self.items:
+                self.items[item_id]["probe"] = meta
+                self._save()
+        return meta
+
+    def set_playback(self, item_id: str, **fields: Any) -> None:
+        with self._lock:
+            item = self.items.get(item_id)
+            if item is None:
+                return
+            pb = item.setdefault("playback", {})
+            pb.update(fields)
+            pb["updated"] = time.time()
+            if set(fields) - {"progress"}:  # progress ticks stay in memory only
+                self._save()
+
+    def drop_playback_copy(self, item_id: str) -> None:
+        with self._lock:
+            item = self.items.get(item_id)
+            pb = (item or {}).get("playback") or {}
+            if pb.get("file") and not pb.get("original_removed"):
+                (self.media_dir / pb["file"]).unlink(missing_ok=True)
+                item["playback"] = {}
+                self._save()
+
+    def finish_playback_copy(self, item_id: str, name: str, target: Dict[str, Any],
+                             keep_original: bool = True) -> None:
+        with self._lock:
+            item = self.items.get(item_id)
+            if item is None:
+                (self.media_dir / name).unlink(missing_ok=True)
+                return
+            size = (self.media_dir / name).stat().st_size
+            pb = item.setdefault("playback", {})
+            pb.update(status="ready", file=name, size=size, target=target, progress=100,
+                      error=None, finished=time.time(), updated=time.time())
+            if not keep_original and item["filename"] != name:
+                (self.media_dir / item["filename"]).unlink(missing_ok=True)
+                item["filename"] = name
+                item["size"] = size
+                pb["original_removed"] = True
+            self._save()
 
     def thumb_of(self, item_id: str) -> Optional[Path]:
         p = self.thumb_dir / f"{item_id}.jpg"
@@ -195,12 +297,17 @@ class Library:
             "expires": expires or None,
             "tags": tags or [],
             "scale_mode": scale_mode or None,
+            "probe": meta,
+            "playback": {},
         }
         make_thumbnail(dest, self.thumb_dir / f"{item_id}.jpg", kind, item["duration"])
         with self._lock:
             old = self.items.get(item_id)
             if old and old["filename"] != filename:
                 (self.media_dir / old["filename"]).unlink(missing_ok=True)
+            old_copy = ((old or {}).get("playback") or {}).get("file")
+            if old_copy and old_copy != filename:
+                (self.media_dir / old_copy).unlink(missing_ok=True)
             self.items[item_id] = item
             self._save()
         log.info("added %s (%s, %s)", item["name"], kind, category)
@@ -243,6 +350,9 @@ class Library:
             if changed:
                 self._save_cues()
         (self.media_dir / item["filename"]).unlink(missing_ok=True)
+        copy = (item.get("playback") or {}).get("file")
+        if copy:
+            (self.media_dir / copy).unlink(missing_ok=True)
         (self.thumb_dir / f"{item_id}.jpg").unlink(missing_ok=True)
         log.info("deleted %s", item["name"])
         return True
@@ -264,7 +374,9 @@ class Library:
 
     def disk_usage(self) -> Dict[str, int]:
         du = shutil.disk_usage(self.media_dir)
-        used = sum(v.get("size", 0) for v in self.items.values())
+        used = sum(v.get("size", 0) + ((v.get("playback") or {}).get("size", 0)
+                                        if not (v.get("playback") or {}).get("original_removed") else 0)
+                   for v in self.items.values())
         return {"library_bytes": used, "free_bytes": du.free, "total_bytes": du.total}
 
     # ---- cues -----------------------------------------------------------------
@@ -288,6 +400,8 @@ class Library:
             "after": after,
             "transition_ms": int(tr) if tr not in (None, "") else None,
             "color": str(data.get("color") or ""),
+            "group": data.get("group") if data.get("group") in CUE_GROUPS else "event",
+            "lock": bool(data.get("lock", False)),
         }
 
     def list_cues(self) -> Dict[str, Dict[str, Any]]:
@@ -319,6 +433,20 @@ class Library:
                 return False
             self._save_cues()
             return True
+
+    def add_standard_scenarios(self) -> List[str]:
+        """Add any missing standard scenarios (existing cue numbers are left alone)."""
+        added = []
+        with self._lock:
+            for num, label, color, lock in STANDARD_SCENARIOS:
+                if num in self.cues:
+                    continue
+                self.cues[num] = self._clean_cue({"label": label, "color": color, "loop": True,
+                                                  "after": "hold", "group": "scenario", "lock": lock})
+                added.append(num)
+            if added:
+                self._save_cues()
+        return added
 
     def replace_cues(self, cues: Dict[str, Dict[str, Any]]) -> None:
         with self._lock:

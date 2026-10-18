@@ -33,7 +33,7 @@
         <label class="check small" style="margin-bottom:8px"><input type="checkbox" id="t-hold"> Hold</label>
         <button class="primary" id="t-play-go">Play</button>
         <span style="flex:1"></span>
-        <button id="t-default">Default</button>
+        <button id="t-default" style="background:#14532d;border-color:#166534" title="Clear scenarios, play the normal playlist">Normal</button>
         <button class="danger" id="t-black">Black</button>
       </div>
       <div class="small muted" id="t-result" style="margin-top:8px"></div>
@@ -85,11 +85,11 @@
   <!-- SHARED CUES -->
   <section class="tab" id="tab-cues">
     <div class="card">
-      <div class="row between"><h2>Shared player cue list</h2><button class="primary" id="cue-add">Add cue</button></div>
+      <div class="row between"><h2>Shared player cue list</h2><div class="row"><button id="cue-scenarios">Add standard scenarios</button><button class="primary" id="cue-add">Add cue</button></div></div>
       <p class="small muted" style="margin-top:0">Pushed to every screen with “Sync cue list” enabled, so cue numbers mean the same thing everywhere.
         Uses media from the fleet library — make sure it targets those screens.</p>
       <div class="table-wrap"><table>
-        <thead><tr><th style="width:70px">#</th><th style="min-width:140px">Label</th><th style="min-width:240px">Media</th><th>Loop</th><th>Duration</th><th>Then</th><th></th></tr></thead>
+        <thead><tr><th style="width:70px">#</th><th style="min-width:140px">Label</th><th style="min-width:240px">Media</th><th>Type</th><th title="Locked: stays up until Normal">Lock</th><th>Loop</th><th>Duration</th><th>Then</th><th></th></tr></thead>
         <tbody id="cue-rows"></tbody></table></div>
     </div>
   </section>

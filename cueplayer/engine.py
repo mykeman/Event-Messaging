@@ -25,6 +25,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from .hwinfo import HW_DECODERS
+
 log = logging.getLogger("cueplayer.engine")
 
 EventCallback = Callable[[Dict[str, Any]], None]
@@ -259,12 +261,7 @@ class GstEngine(BaseEngine):
 
     # Hardware decoders that are safe to prefer when present. Most are registered below
     # the software decoders by default, so decodebin would otherwise pick avdec_*.
-    HW_DECODERS = (
-        "v4l2h264dec", "v4l2h265dec",          # Raspberry Pi 4 (stateful V4L2)
-        "v4l2slh264dec", "v4l2slh265dec",      # stateless V4L2 (Pi 5 HEVC, others)
-        "vah264dec", "vah265dec", "vavp9dec",  # Intel/AMD VA-API (x86 mini PCs)
-        "nvh264dec", "nvh265dec",              # NVIDIA
-    )
+    HW_DECODERS = tuple(HW_DECODERS)
 
     def _apply_decoder_ranks(self, enabled: bool) -> None:
         reg = Gst.Registry.get()

@@ -42,6 +42,8 @@ def parse_opts(tokens: List[str]) -> Dict[str, Any]:
             o["loop"] = False
         elif u == "HOLD":
             o["after"] = "hold"
+        elif u == "FORCE":
+            o["force"] = True
         elif "=" in t:
             k, v = t.split("=", 1)
             k = k.lower()
@@ -65,7 +67,8 @@ def status_line(st: Dict[str, Any], prefix: str = "STATUS") -> str:
     m = st.get("media") or {}
     parts = [prefix, f"mode={st.get('mode')}", f"cue={q(st.get('cue') or '')}",
              f"media={q(m.get('name') or '')}", f"id={m.get('id') or ''}",
-             f"kind={m.get('kind') or ''}"]
+             f"kind={m.get('kind') or ''}", f"lock={1 if st.get('lock') else 0}",
+             f"label={q(st.get('label') or '')}"]
     if st.get("elapsed") is not None:
         parts.append(f"elapsed={st['elapsed']:.1f}")
     if st.get("duration"):
@@ -205,16 +208,16 @@ def player_handler(ctrl) -> Handler:
             if not args:
                 return "ERR PLAY needs a media name or id"
             st = ctrl.play(args[0], **parse_opts(args[1:]))
-        elif cmd in ("STOP", "DEFAULT"):
+        elif cmd in ("STOP", "DEFAULT", "NORMAL", "CLEAR"):
             st = ctrl.play_default(parse_opts(args).get("transition_ms"))
         elif cmd == "BLACK":
             st = ctrl.black(parse_opts(args).get("transition_ms"))
         elif cmd == "NEXT":
-            st = ctrl.next()
+            st = ctrl.next(bool(parse_opts(args).get("force")))
         elif cmd == "STATUS":
             return status_line(ctrl.status())
         elif cmd == "HELP":
-            return "OK commands: PING AUTH CUE PLAY STOP DEFAULT BLACK NEXT STATUS EVENTS ON|OFF"
+            return "OK commands: PING AUTH CUE PLAY NORMAL BLACK NEXT STATUS EVENTS ON|OFF (opts: LOOP HOLD FORCE)"
         else:
             return f"ERR unknown command {cmd}"
         return status_line(st, "OK")

@@ -125,7 +125,7 @@ function renderGcueButtons() {
 
 function actionRow(a = {}) {
   const tg = el("select", { class: "a-target" }, ...targetOptions().map(([v, l]) => el("option", { value: v, selected: v === (a.target || "all") }, l)));
-  const act = el("select", { class: "a-action" }, ...["cue", "play", "default", "black", "stop", "next"].map(v => el("option", { value: v, selected: v === (a.action || "cue") }, v)));
+  const act = el("select", { class: "a-action" }, ...["cue", "play", "normal", "black", "next"].map(v => el("option", { value: v, selected: v === (a.action || "cue") }, v)));
   const ref = el("input", { class: "a-ref", value: a.ref || "", placeholder: "cue # / media", list: "media-list-dl" });
   const after = el("select", { class: "a-after" }, ...[["", "(cue default)"], ["default", "then default"], ["hold", "then hold"], ["black", "then black"]].map(([v, l]) =>
     el("option", { value: v, selected: v === (a.after || "") }, l)));
@@ -217,6 +217,9 @@ function sharedCueRow(num, c, isNew) {
     el("td", {}, el("input", { class: "c-num", value: num, disabled: !isNew })),
     el("td", {}, el("input", { class: "c-label", value: c.label || "" })),
     el("td", {}, sel),
+    el("td", {}, el("select", { class: "c-group" }, el("option", { value: "event", selected: c.group !== "scenario" }, "Event"),
+      el("option", { value: "scenario", selected: c.group === "scenario" }, "Scenario"))),
+    el("td", {}, el("input", { type: "checkbox", class: "c-lock", checked: !!c.lock })),
     el("td", {}, el("input", { type: "checkbox", class: "c-loop", checked: !!c.loop })),
     el("td", {}, el("input", { type: "number", class: "c-dur", value: c.duration || "", placeholder: "auto", style: { width: "80px" } })),
     el("td", {}, el("select", { class: "c-after" }, ...["default", "hold", "black"].map(v => el("option", { value: v, selected: c.after === v }, v)))),
@@ -225,7 +228,8 @@ function sharedCueRow(num, c, isNew) {
         const n = $(".c-num", tr).value.trim();
         const media = [...sel.selectedOptions].map(o => o.value);
         await api("PUT", "/api/cues/" + encodeURIComponent(n), { label: $(".c-label", tr).value, media: media.length > 1 ? media : media[0] || null,
-          loop: $(".c-loop", tr).checked, duration: $(".c-dur", tr).value || null, after: $(".c-after", tr).value });
+          loop: $(".c-loop", tr).checked, duration: $(".c-dur", tr).value || null, after: $(".c-after", tr).value,
+          group: $(".c-group", tr).value, lock: $(".c-lock", tr).checked, color: c.color || "" });
         toast("Saved — sync screens to push", "ok"); loadCues();
       } }, "Save"),
       el("button", { class: "danger icon", onclick: () => isNew ? tr.remove() : confirmDo("Delete cue " + num + "?", async () => { await api("DELETE", "/api/cues/" + encodeURIComponent(num)); loadCues(); }) }, "×"))));
@@ -281,7 +285,7 @@ async function init() {
   $("#t-cue").onkeydown = e => { if (e.key === "Enter") $("#t-cue-go").click(); };
   $("#t-play-go").onclick = () => $("#t-media").value && sendTarget("play", $("#t-media").value,
     { loop: $("#t-loop").checked, after: $("#t-hold").checked ? "hold" : "default" });
-  $("#t-default").onclick = () => sendTarget("default");
+  $("#t-default").onclick = () => sendTarget("normal");
   $("#t-black").onclick = () => sendTarget("black");
   $("#screen-add").onclick = () => editScreen(null);
   $("#sync-all").onclick = async () => { await api("POST", "/api/sync"); toast("Sync started", "ok"); };
@@ -294,6 +298,11 @@ async function init() {
     $("#cue-rows").append(sharedCueRow(String(nums.length ? Math.max(...nums) + 1 : 1), { after: "default" }, true));
   };
   $("#lib-filter").oninput = renderMediaList;
+  $("#cue-scenarios").onclick = async () => {
+    const r = await api("POST", "/api/cues/scenarios");
+    toast(r.added.length ? `Added ${r.added.length} scenarios — assign media, then sync screens with cue sync on` : "All standard scenarios are already present", "ok");
+    loadCues();
+  };
   makeDropZone($("#drop"), uploadFiles);
   $("#m-save").onclick = async () => {
     const tok = $("#m-token").value;

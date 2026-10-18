@@ -1,0 +1,408 @@
+-- CuePlayer Q-SYS plugin
+-- Button triggers for the Normal playlist, standard scenarios and event cues on a
+-- CuePlayer screen (direct) or a group of screens (via the CuePlayer master).
+--
+-- Install: copy this file to  Documents\QSC\Q-Sys Designer\Plugins  and restart Designer.
+-- The plugin appears under User Plugins > CuePlayer.
+--
+-- Buttons label and colour themselves from the unit's cue list (Scenario cues fill the
+-- Scenario buttons, Event cues fill the Event buttons, in cue-number order). Turn on
+-- "Manual" on the Setup page to type cue numbers per button instead.
+
+PluginInfo = {
+  Name = "CuePlayer~Event Signage",
+  Version = "1.0",
+  BuildVersion = "1.0.0.0",
+  Id = "5283535a-bce9-4fd7-9247-04f4c7989b13",
+  Author = "CuePlayer",
+  Description = "Normal / scenario / event cue triggers with live feedback for CuePlayer signage",
+  ShowDebug = true,
+}
+
+function GetColor(props)
+  return { 22, 83, 45 }
+end
+
+function GetPrettyName(props)
+  return "CuePlayer " .. PluginInfo.Version
+end
+
+PageNames = { "Control", "Setup" }
+function GetPages(props)
+  local pages = {}
+  for ix, name in ipairs(PageNames) do
+    table.insert(pages, { name = PageNames[ix] })
+  end
+  return pages
+end
+
+function GetProperties()
+  return {
+    { Name = "Connect To", Type = "enum", Choices = { "Player", "Master" }, Value = "Player" },
+    { Name = "Scenario Buttons", Type = "integer", Min = 0, Max = 24, Value = 9 },
+    { Name = "Event Buttons", Type = "integer", Min = 0, Max = 48, Value = 12 },
+    { Name = "Debug Print", Type = "enum", Choices = { "None", "All" }, Value = "None" },
+  }
+end
+
+function RectifyProperties(props)
+  return props
+end
+
+local function count(props, name)
+  return math.max(0, props[name].Value)
+end
+
+function GetControls(props)
+  local ns, ne = count(props, "Scenario Buttons"), count(props, "Event Buttons")
+  local c = {
+    -- setup
+    { Name = "IPAddress", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "TcpPort", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "HttpPort", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "Token", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "Target", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "ManualMap", ControlType = "Button", ButtonType = "Toggle", Count = 1, UserPin = true, PinStyle = "Both" },
+    { Name = "Refresh", ControlType = "Button", ButtonType = "Trigger", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "Connected", ControlType = "Indicator", IndicatorType = "Led", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "Status", ControlType = "Indicator", IndicatorType = "Status", Count = 1, UserPin = true, PinStyle = "Output" },
+    -- transport + feedback
+    { Name = "Normal", ControlType = "Button", ButtonType = "Momentary", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "Black", ControlType = "Button", ButtonType = "Momentary", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "Next", ControlType = "Button", ButtonType = "Momentary", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "IsNormal", ControlType = "Indicator", IndicatorType = "Led", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "Locked", ControlType = "Indicator", IndicatorType = "Led", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "Mode", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "ActiveCue", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "NowPlaying", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = true, PinStyle = "Output" },
+  }
+  if ns > 0 then
+    table.insert(c, { Name = "Scenario", ControlType = "Button", ButtonType = "Momentary", Count = ns, UserPin = true, PinStyle = "Input" })
+    table.insert(c, { Name = "ScenarioActive", ControlType = "Indicator", IndicatorType = "Led", Count = ns, UserPin = true, PinStyle = "Output" })
+    table.insert(c, { Name = "ScenarioCue", ControlType = "Text", Count = ns, UserPin = true, PinStyle = "Both" })
+  end
+  if ne > 0 then
+    table.insert(c, { Name = "Event", ControlType = "Button", ButtonType = "Momentary", Count = ne, UserPin = true, PinStyle = "Input" })
+    table.insert(c, { Name = "EventActive", ControlType = "Indicator", IndicatorType = "Led", Count = ne, UserPin = true, PinStyle = "Output" })
+    table.insert(c, { Name = "EventCue", ControlType = "Text", Count = ne, UserPin = true, PinStyle = "Both" })
+  end
+  return c
+end
+
+-- Array controls are addressed "Name 1".."Name n" in the layout when Count > 1
+local function nm(base, i, n)
+  return n > 1 and (base .. " " .. i) or base
+end
+
+function GetControlLayout(props)
+  local layout, graphics = {}, {}
+  local page = PageNames[props["page_index"].Value]
+  local ns, ne = count(props, "Scenario Buttons"), count(props, "Event Buttons")
+  local cols, bw, bh, gap = 6, 104, 52, 8
+
+  local function label(text, x, y, w, h, size, align)
+    table.insert(graphics, { Type = "Text", Text = text, Position = { x, y }, Size = { w, h },
+      FontSize = size or 12, HTextAlign = align or "Left" })
+  end
+  local function box(text, x, y, w, h)
+    table.insert(graphics, { Type = "GroupBox", Text = text, HTextAlign = "Left", Position = { x, y },
+      Size = { w, h }, StrokeWidth = 1, CornerRadius = 8, Fill = { 235, 236, 240 } })
+  end
+  local function grid(base, n, x0, y0, color)
+    for i = 1, n do
+      local col, row = (i - 1) % cols, math.floor((i - 1) / cols)
+      local x, y = x0 + col * (bw + gap), y0 + row * (bh + gap)
+      layout[nm(base, i, n)] = { PrettyName = base .. "~" .. i, Style = "Button", Legend = base .. " " .. i,
+        Position = { x, y }, Size = { bw, bh }, Color = color, FontSize = 11, Margin = 2, CornerRadius = 6 }
+      layout[nm(base .. "Active", i, n)] = { PrettyName = base .. "~" .. i .. " Active", Style = "Led",
+        Position = { x + bw - 18, y + 4 }, Size = { 14, 14 }, Color = { 255, 40, 40 }, UnlinkOffColor = true,
+        OffColor = { 90, 90, 90 } }
+    end
+    return math.ceil(n / cols) * (bh + gap)
+  end
+  local width = cols * (bw + gap) + 24
+
+  if page == "Control" then
+    box("CuePlayer", 0, 0, width, 104)
+    layout["Normal"] = { PrettyName = "Transport~Normal", Style = "Button", Legend = "NORMAL",
+      Position = { 12, 22 }, Size = { 150, 70 }, Color = { 22, 140, 70 }, FontSize = 18, CornerRadius = 8 }
+    layout["IsNormal"] = { PrettyName = "Feedback~Is Normal", Style = "Led", Position = { 140, 26 }, Size = { 16, 16 },
+      Color = { 60, 255, 120 } }
+    layout["Black"] = { PrettyName = "Transport~Black", Style = "Button", Legend = "Black",
+      Position = { 170, 22 }, Size = { 80, 33 }, Color = { 40, 40, 40 } }
+    layout["Next"] = { PrettyName = "Transport~Next", Style = "Button", Legend = "Next",
+      Position = { 170, 59 }, Size = { 80, 33 } }
+    label("Mode", 262, 22, 60, 16, 10)
+    layout["Mode"] = { PrettyName = "Feedback~Mode", Style = "Text", Position = { 262, 38 }, Size = { 90, 22 }, FontSize = 12 }
+    label("Locked", 360, 22, 50, 16, 10)
+    layout["Locked"] = { PrettyName = "Feedback~Locked", Style = "Led", Position = { 368, 40 }, Size = { 18, 18 },
+      Color = { 255, 40, 40 } }
+    label("Active", 420, 22, 200, 16, 10)
+    layout["ActiveCue"] = { PrettyName = "Feedback~Active Cue", Style = "Text", Position = { 420, 38 }, Size = { width - 432, 22 }, FontSize = 12 }
+    label("Now playing", 262, 62, 100, 16, 10)
+    layout["NowPlaying"] = { PrettyName = "Feedback~Now Playing", Style = "Text", Position = { 262, 76 }, Size = { width - 274, 18 }, FontSize = 11 }
+    local y = 112
+    if ns > 0 then
+      local h = math.ceil(ns / cols) * (bh + gap) + 30
+      box("Scenarios", 0, y, width, h)
+      grid("Scenario", ns, 12, y + 22, { 120, 60, 20 })
+      y = y + h + 8
+    end
+    if ne > 0 then
+      local h = math.ceil(ne / cols) * (bh + gap) + 30
+      box("Event content", 0, y, width, h)
+      grid("Event", ne, 12, y + 22, { 30, 80, 160 })
+    end
+  else
+    box("Connection", 0, 0, 420, 250)
+    local rows = {
+      { "IPAddress", "IP address" }, { "TcpPort", "TCP port (7700)" }, { "HttpPort", "HTTP port (8080)" },
+      { "Token", "API token" }, { "Target", "Target (master: ALL / GROUP x / SCREEN x)" },
+    }
+    for i, r in ipairs(rows) do
+      local y = 22 + (i - 1) * 30
+      label(r[2], 12, y, 230, 24)
+      layout[r[1]] = { PrettyName = "Setup~" .. r[2], Style = "Text", Position = { 246, y }, Size = { 160, 24 }, FontSize = 12 }
+    end
+    label("Manual cue numbers (off = auto from cue list)", 12, 176, 230, 24)
+    layout["ManualMap"] = { PrettyName = "Setup~Manual Cue Numbers", Style = "Button", Position = { 246, 176 }, Size = { 50, 24 }, Legend = "Manual" }
+    layout["Refresh"] = { PrettyName = "Setup~Refresh Cues", Style = "Button", Position = { 306, 176 }, Size = { 100, 24 }, Legend = "Refresh cues" }
+    label("Connected", 12, 210, 80, 24)
+    layout["Connected"] = { PrettyName = "Setup~Connected", Style = "Led", Position = { 96, 214 }, Size = { 16, 16 }, Color = { 60, 255, 120 } }
+    layout["Status"] = { PrettyName = "Setup~Status", Style = "Text", Position = { 126, 208 }, Size = { 280, 28 } }
+
+    local y = 260
+    local function cueFields(base, n, title)
+      if n == 0 then return end
+      local h = math.ceil(n / 6) * 30 + 30
+      box(title .. " cue numbers (used when Manual is on)", 0, y, 420, h)
+      for i = 1, n do
+        local col, row = (i - 1) % 6, math.floor((i - 1) / 6)
+        layout[nm(base, i, n)] = { PrettyName = "Setup~" .. title .. " " .. i .. " Cue", Style = "Text",
+          Position = { 12 + col * 66, y + 22 + row * 30 }, Size = { 60, 24 } }
+      end
+      y = y + h + 8
+    end
+    cueFields("ScenarioCue", ns, "Scenario")
+    cueFields("EventCue", ne, "Event")
+  end
+  return layout, graphics
+end
+
+--------------------------------------------------------------------------------
+-- Runtime
+--------------------------------------------------------------------------------
+if Controls then
+  local DEBUG = Properties["Debug Print"].Value == "All"
+  local VIA_MASTER = Properties["Connect To"].Value == "Master"
+  local json_ok, json = pcall(require, "rapidjson")
+  if not json_ok then json = require("json") end
+
+  local function dbg(...) if DEBUG then print(...) end end
+  local function arr(name)
+    local c = Controls[name]
+    if c == nil then return {} end
+    if c[1] ~= nil then return c end
+    return { c }
+  end
+  local scen, scenLed, scenCue = arr("Scenario"), arr("ScenarioActive"), arr("ScenarioCue")
+  local evt, evtLed, evtCue = arr("Event"), arr("EventActive"), arr("EventCue")
+
+  -- defaults
+  if Controls.TcpPort.String == "" then Controls.TcpPort.String = "7700" end
+  if Controls.HttpPort.String == "" then Controls.HttpPort.String = "8080" end
+  if Controls.Target.String == "" and VIA_MASTER then Controls.Target.String = "ALL" end
+
+  local function setStatus(code, text)
+    -- Status indicator: 0 OK, 1 compromised, 2 fault, 3 not present, 5 initializing
+    Controls.Status.Value = code
+    Controls.Status.String = text or ""
+  end
+
+  ---------------------------------------------------------------- TCP
+  local sock = TcpSocket.New()
+  sock.ReadTimeout = 0
+  sock.WriteTimeout = 5
+  sock.ReconnectTimeout = 5
+
+  local function send(line)
+    dbg("TX " .. line)
+    if sock.IsConnected then
+      sock:Write(line .. "\r\n")
+    else
+      setStatus(2, "not connected")
+    end
+  end
+
+  local function quote(s)
+    if s:find("[%s\"]") then return '"' .. s:gsub('"', "'") .. '"' end
+    return s
+  end
+
+  -- Through the master every command is prefixed with the target (ALL / GROUP x / SCREEN x)
+  local function cmd(c)
+    local t = Controls.Target.String
+    if VIA_MASTER and t ~= "" then return t .. " " .. c end
+    return c
+  end
+
+  local function parse(line)
+    local out = {}
+    for k, v in line:gmatch('(%w+)="([^"]*)"') do out[k] = v end
+    for k, v in line:gmatch('(%w+)=([^%s"]+)') do if out[k] == nil then out[k] = v end end
+    return out
+  end
+
+  local function cueOf(textCtl) return textCtl and textCtl.String or "" end
+
+  local function feedback(kv)
+    local mode = kv.mode or ""
+    local active = (mode == "cue" or mode == "hold") and (kv.cue or "") or ""
+    Controls.Mode.String = (mode == "default") and "normal" or mode
+    Controls.IsNormal.Boolean = (mode == "default")
+    Controls.Locked.Boolean = (kv.lock == "1")
+    Controls.NowPlaying.String = kv.media or ""
+    Controls.ActiveCue.String = active ~= "" and (active .. "  " .. (kv.label or "")) or ""
+    for i, led in ipairs(scenLed) do led.Boolean = active ~= "" and cueOf(scenCue[i]) == active end
+    for i, led in ipairs(evtLed) do led.Boolean = active ~= "" and cueOf(evtCue[i]) == active end
+  end
+
+  -- Via a master, lines carry screen=<name>; follow the screen named in Target if it's
+  -- "SCREEN x", otherwise any screen.
+  local function wanted(kv)
+    if kv.screen == nil then return true end
+    local want = Controls.Target.String:match("^[Ss][Cc][Rr][Ee][Ee][Nn]%s+(.+)$")
+    return want == nil or want == kv.screen
+  end
+
+  sock.EventHandler = function(s, evt_, err)
+    if evt_ == TcpSocket.Events.Connected then
+      Controls.Connected.Boolean = true
+      setStatus(0, "connected")
+      if Controls.Token.String ~= "" then s:Write("AUTH " .. Controls.Token.String .. "\r\n") end
+      s:Write("STATUS\r\n")
+    elseif evt_ == TcpSocket.Events.Data then
+      local line = s:ReadLine(TcpSocket.EOL.CrLf)
+      while line do
+        dbg("RX " .. line)
+        if line:match("^EVENT") or line:match("^STATUS") or line:match("^OK mode=") then
+          local kv = parse(line)
+          if kv.mode and wanted(kv) then feedback(kv) end
+        end
+        if line:match("^ERR") then
+          setStatus(1, line:sub(5))
+        elseif line:match("^OK") then
+          setStatus(0, "connected")
+        end
+        line = s:ReadLine(TcpSocket.EOL.CrLf)
+      end
+    else
+      Controls.Connected.Boolean = false
+      setStatus(2, "disconnected" .. (err and (": " .. err) or ""))
+    end
+  end
+
+  ---------------------------------------------------------------- cue list (HTTP)
+  local function applyButton(btn, cueCtl, cue)
+    if cue then
+      cueCtl.String = cue.number
+      btn.Legend = cue.label ~= "" and cue.label or ("Cue " .. cue.number)
+      if cue.color and cue.color:match("^#%x%x%x%x%x%x$") then btn.Color = cue.color end
+    elseif not Controls.ManualMap.Boolean then
+      cueCtl.String = ""
+      btn.Legend = "—"
+    end
+  end
+
+  local function refreshCues()
+    local ip = Controls.IPAddress.String
+    if ip == "" then return end
+    local headers = {}
+    if Controls.Token.String ~= "" then headers["X-API-Key"] = Controls.Token.String end
+    HttpClient.Download {
+      Url = "http://" .. ip .. ":" .. Controls.HttpPort.String .. "/api/cues",
+      Headers = headers,
+      Timeout = 8,
+      EventHandler = function(_, code, data, err)
+        if code ~= 200 then
+          setStatus(1, "cue list: HTTP " .. tostring(code) .. " " .. (err or ""))
+          return
+        end
+        local ok, cues = pcall(json.decode, data)
+        if not ok or type(cues) ~= "table" then
+          setStatus(1, "cue list: bad response")
+          return
+        end
+        local sList, eList = {}, {}
+        for number, c in pairs(cues) do
+          local entry = { number = number, label = c.label or "", color = c.color or "" }
+          if c.group == "scenario" then table.insert(sList, entry) else table.insert(eList, entry) end
+        end
+        local function byNumber(a, b)
+          local na, nb = tonumber(a.number), tonumber(b.number)
+          if na and nb then return na < nb end
+          if na or nb then return na ~= nil end
+          return a.number < b.number
+        end
+        table.sort(sList, byNumber)
+        table.sort(eList, byNumber)
+        local byNum = {}
+        for _, c in ipairs(sList) do byNum[c.number] = c end
+        for _, c in ipairs(eList) do byNum[c.number] = c end
+        for i, b in ipairs(scen) do
+          applyButton(b, scenCue[i], (not Controls.ManualMap.Boolean) and sList[i] or byNum[cueOf(scenCue[i])])
+        end
+        for i, b in ipairs(evt) do
+          applyButton(b, evtCue[i], (not Controls.ManualMap.Boolean) and eList[i] or byNum[cueOf(evtCue[i])])
+        end
+        dbg(("cue list: %d scenarios, %d event cues"):format(#sList, #eList))
+        if sock.IsConnected then sock:Write("STATUS\r\n") end  -- refresh LEDs against new mapping
+      end,
+    }
+  end
+
+  ---------------------------------------------------------------- wiring
+  local function connect()
+    if sock.IsConnected then sock:Disconnect() end
+    local ip = Controls.IPAddress.String
+    if ip == "" then
+      setStatus(3, "enter the CuePlayer IP address")
+      return
+    end
+    setStatus(5, "connecting to " .. ip)
+    sock:Connect(ip, tonumber(Controls.TcpPort.String) or 7700)
+    refreshCues()
+  end
+
+  for i, b in ipairs(scen) do
+    b.EventHandler = function(c)
+      if c.Boolean and cueOf(scenCue[i]) ~= "" then send(cmd("CUE " .. quote(cueOf(scenCue[i])))) end
+    end
+  end
+  for i, b in ipairs(evt) do
+    b.EventHandler = function(c)
+      if c.Boolean and cueOf(evtCue[i]) ~= "" then send(cmd("CUE " .. quote(cueOf(evtCue[i])))) end
+    end
+  end
+  Controls.Normal.EventHandler = function(c) if c.Boolean then send(cmd("NORMAL")) end end
+  Controls.Black.EventHandler = function(c) if c.Boolean then send(cmd("BLACK")) end end
+  Controls.Next.EventHandler = function(c) if c.Boolean then send(cmd("NEXT")) end end
+  Controls.Refresh.EventHandler = refreshCues
+  Controls.ManualMap.EventHandler = refreshCues
+  for _, ctl in ipairs(scenCue) do ctl.EventHandler = refreshCues end
+  for _, ctl in ipairs(evtCue) do ctl.EventHandler = refreshCues end
+  for _, name in ipairs({ "IPAddress", "TcpPort", "HttpPort", "Token" }) do
+    Controls[name].EventHandler = connect
+  end
+  Controls.Target.EventHandler = function() if sock.IsConnected then sock:Write("STATUS\r\n") end end
+
+  -- keep-alive (a dead link is noticed quickly) and periodic cue-list refresh
+  local keepalive = Timer.New()
+  keepalive.EventHandler = function() if sock.IsConnected then sock:Write("PING\r\n") end end
+  keepalive:Start(15)
+  local cueTimer = Timer.New()
+  cueTimer.EventHandler = refreshCues
+  cueTimer:Start(60)
+
+  connect()
+end

@@ -134,14 +134,35 @@ def main():
         r = c.post("/api/cue/99")
         check(r.status_code == 404, "unknown cue -> 404")
 
+        # --- standard scenarios + locking ---
+        cues = c.get("/api/cues").json()
+        check(cues.get("107", {}).get("label") == "Fire alarm" and cues["107"]["lock"]
+              and cues["107"]["group"] == "scenario", "standard scenarios seeded")
+        c.put("/api/cues/107", json=dict(cues["107"], media=img["id"]))
+        st = c.get("/api/cue/107").json()
+        check(st["lock"] and st["label"] == "Fire alarm", "fire alarm scenario locks")
+        r = c.get("/api/cue/1")
+        check(r.status_code == 409 and "Fire alarm" in r.json()["detail"], f"event cue blocked by fire alarm ({r.status_code})")
+        check(c.get("/api/next").status_code == 409, "next blocked while locked")
+        st = c.get("/api/cue/1", params={"force": 1}).json()
+        check(st["cue"] == "1" and not st["lock"], "force overrides lock")
+        c.get("/api/cue/107")
+        st = c.get("/api/normal").json()
+        check(st["mode"] == "default" and not st["lock"], "NORMAL clears the lock")
+        r = c.post("/api/cues/scenarios").json()
+        check(r["added"] == [], "re-adding scenarios doesn't duplicate")
+
         # --- TCP ---
         out = tcp(["PING", "CUE 1", "STATUS", "PLAY \"Welcome Slide\" HOLD", "BLACK FADE=0",
-                   "BOGUS"])
+                   "BOGUS", "CUE 107", "CUE 1", "NORMAL"])
         check(out[0] == "PONG", "tcp ping")
         check(any(l.startswith("OK mode=cue cue=1") for l in out), "tcp cue")
         check(any(l.startswith("STATUS mode=cue") for l in out), "tcp status")
         check(any(l.startswith("EVENT mode=") for l in out), "tcp push events")
         check(any("ERR unknown command BOGUS" in l for l in out), "tcp unknown cmd")
+        check(any(l.startswith("OK mode=cue cue=107") and "lock=1" in l for l in out), "tcp scenario lock=1")
+        check(any(l.startswith("ERR blocked") for l in out), "tcp trigger blocked while locked")
+        check(any(l.startswith("OK mode=default") and "lock=0" in l for l in out), "tcp NORMAL clears")
 
         # --- UDP ---
         u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

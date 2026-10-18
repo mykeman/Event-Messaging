@@ -57,6 +57,15 @@ DEFAULTS: Dict[str, Any] = {
         "fps": 5,
         "width": 640,
     },
+    "transcode": {
+        # auto: convert files this unit would struggle to play; always: convert everything;
+        # off: play files as uploaded
+        "mode": "auto",
+        "keep_original": True,   # keep the uploaded file alongside the playback copy
+        "crf": 20,               # x264 quality (lower = better/larger, 18-23 is typical)
+        "preset": "veryfast",    # x264 speed/size trade-off
+        "threads": 0,            # 0 = all cores but two (leaves room for playback)
+    },
     "playback": {
         "image_duration": 10,
         # What plays when nothing is triggered: "playlist" or "black"

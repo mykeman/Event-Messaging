@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .common import (VERSION, WEB_DIR, Broadcaster, as_bool, as_float, as_int, hostname,
                      make_auth, params, ws_authorised)
-from .controller import Controller, PlayError
+from .controller import Blocked, Controller, PlayError
 from .library import CATEGORIES, Library
 
 log = logging.getLogger("cueplayer.api")
@@ -45,6 +45,8 @@ def create_player_app(ctrl: Controller) -> FastAPI:
     auth = make_auth(get_token)
     bus = Broadcaster()
     ctrl.subscribe(bus.publish)
+    tc = ctrl.transcoder
+    tc.on_change = lambda: ctrl.loop.call_soon_threadsafe(bus.publish, {"event": "library"})
 
     app = FastAPI(title="CuePlayer", version=VERSION,
                   description="Cue-triggered video/image playback for LED screens. "
@@ -54,6 +56,8 @@ def create_player_app(ctrl: Controller) -> FastAPI:
     def run(fn, *a, **kw):
         try:
             return fn(*a, **kw)
+        except Blocked as e:
+            raise HTTPException(409, str(e))
         except PlayError as e:
             raise HTTPException(404, str(e))
 
@@ -81,7 +85,8 @@ def create_player_app(ctrl: Controller) -> FastAPI:
         return {"loop": as_bool(p.get("loop", False)),
                 "duration": as_float(p.get("duration")),
                 "after": str(p.get("after") or "default"),
-                "transition_ms": as_int(p.get("transition", p.get("transition_ms")))}
+                "transition_ms": as_int(p.get("transition", p.get("transition_ms"))),
+                "force": as_bool(p.get("force", False))}
 
     @app.api_route("/api/play", methods=["GET", "POST"], dependencies=[api])
     async def play(p: Dict[str, Any] = Depends(params)):
@@ -98,6 +103,7 @@ def create_player_app(ctrl: Controller) -> FastAPI:
     async def cue(ref: str, p: Dict[str, Any] = Depends(params)):
         o = play_opts(p)
         overrides = {k: o[k] for k in ("duration", "transition_ms") if o[k] is not None}
+        overrides["force"] = o["force"]
         if "loop" in p:
             overrides["loop"] = o["loop"]
         if "after" in p:
@@ -108,6 +114,8 @@ def create_player_app(ctrl: Controller) -> FastAPI:
     async def stop(p: Dict[str, Any] = Depends(params)):
         return ctrl.stop(as_int(p.get("transition")))
 
+    @app.api_route("/api/normal", methods=["GET", "POST"], dependencies=[api])
+    @app.api_route("/api/clear", methods=["GET", "POST"], dependencies=[api])
     @app.api_route("/api/default", methods=["GET", "POST"], dependencies=[api])
     async def default(p: Dict[str, Any] = Depends(params)):
         return ctrl.play_default(as_int(p.get("transition")))
@@ -117,8 +125,8 @@ def create_player_app(ctrl: Controller) -> FastAPI:
         return ctrl.black(as_int(p.get("transition")))
 
     @app.api_route("/api/next", methods=["GET", "POST"], dependencies=[api])
-    async def next_():
-        return ctrl.next()
+    async def next_(p: Dict[str, Any] = Depends(params)):
+        return run(ctrl.next, as_bool(p.get("force", False)))
 
     # ---- media -------------------------------------------------------------
     @app.get("/api/media", dependencies=[api])
@@ -147,6 +155,7 @@ def create_player_app(ctrl: Controller) -> FastAPI:
             raise HTTPException(400, str(e))
         finally:
             tmp.unlink(missing_ok=True)
+        item = await asyncio.get_running_loop().run_in_executor(None, tc.evaluate, item["id"]) or item
         bus.publish({"event": "library"})
         return item
 
@@ -163,11 +172,37 @@ def create_player_app(ctrl: Controller) -> FastAPI:
             item = lib.update(item_id, p)
         except KeyError:
             raise HTTPException(404, "not found")
+        if "scale_mode" in p:  # changes the size the playback copy should be
+            item = await asyncio.get_running_loop().run_in_executor(None, tc.evaluate, item_id) or item
         bus.publish({"event": "library"})
         return item
 
+    @app.post("/api/media/{item_id}/convert", dependencies=[api])
+    async def media_convert(item_id: str):
+        """Make a playback copy now, even if the file doesn't strictly need one."""
+        if not lib.get(item_id):
+            raise HTTPException(404, "not found")
+        return await asyncio.get_running_loop().run_in_executor(None, tc.evaluate, item_id, True)
+
+    @app.delete("/api/media/{item_id}/converted", dependencies=[api])
+    def media_use_original(item_id: str):
+        """Discard the playback copy and always play the uploaded file."""
+        item = lib.get(item_id)
+        if not item:
+            raise HTTPException(404, "not found")
+        if (item.get("playback") or {}).get("original_removed"):
+            raise HTTPException(409, "the original was not kept (transcode.keep_original is off)")
+        tc.use_original(item_id)
+        return lib.get(item_id)
+
+    @app.get("/api/hardware", dependencies=[api])
+    def hardware():
+        from .hwinfo import detect
+        return dict(detect(), converting=tc.current, queued=len(tc.pending))
+
     @app.delete("/api/media/{item_id}", dependencies=[api])
     def media_delete(item_id: str):
+        tc.cancel(item_id)
         if (ctrl.state.get("media") or {}).get("id") == item_id:
             ctrl.stop(0)
         if not lib.delete(item_id):
@@ -195,6 +230,13 @@ def create_player_app(ctrl: Controller) -> FastAPI:
     @app.get("/api/cues", dependencies=[api])
     def cues():
         return lib.list_cues()
+
+    @app.post("/api/cues/scenarios", dependencies=[api])
+    def cues_add_scenarios():
+        """Add the standard scenarios (capacity, fire alarm, evacuate...) that are missing."""
+        added = lib.add_standard_scenarios()
+        bus.publish({"event": "cues"})
+        return {"added": added, "cues": lib.list_cues()}
 
     @app.put("/api/cues", dependencies=[api])
     async def cues_replace(request: Request):

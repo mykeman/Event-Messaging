@@ -87,8 +87,9 @@ async def run(args) -> None:
         on_stop = ctrl.shutdown
 
     await lines.start(args.host, tcp_port, udp_port)
+    # Don't wait on open GUI websockets at shutdown (systemctl restart would otherwise hang)
     config = uvicorn.Config(app, host=args.host, port=http_port, log_level="warning",
-                            access_log=False)
+                            access_log=False, timeout_graceful_shutdown=3)
     server = uvicorn.Server(config)
     log.info("CuePlayer %s (%s) - web GUI on http://%s:%s/", VERSION, args.role,
              hostname(), http_port)

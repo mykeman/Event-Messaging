@@ -41,7 +41,7 @@
           <div class="progress"><div id="now-progress"></div></div>
         </div>
         <div class="transport">
-          <button class="big" id="btn-default" title="Return to default content">Default</button>
+          <button class="big" id="btn-default" title="Everything is normal: clear any scenario and play the normal playlist" style="background:#14532d;border-color:#166534">Normal</button>
           <button class="big" id="btn-next" title="Skip to next item">Next</button>
           <button class="big danger" id="btn-black" title="Fade to black">Black</button>
         </div>
@@ -54,7 +54,13 @@
         <div class="err-list" id="st-errors"></div>
       </div>
       <div class="card">
-        <div class="row between"><h2>Cues</h2><a href="#cues" class="small">Edit cues</a></div>
+        <div class="card hidden" id="lock-banner" style="background:#3a1717;border-color:#ef4444;margin-bottom:12px;padding:10px 12px">
+          <div class="row between"><b id="lock-text"></b><button class="small" id="lock-clear">Clear — back to Normal</button></div>
+          <div class="small muted">Locked scenario: other triggers are blocked until it's cleared.</div>
+        </div>
+        <div class="row between"><h2>Scenarios</h2><a href="#cues" class="small">Edit cues</a></div>
+        <div class="cue-grid" id="live-scenarios"></div>
+        <h3>Event cues</h3>
         <div class="cue-grid" id="live-cues"></div>
         <h3>Quick play</h3>
         <div class="row" style="margin-bottom:8px">
@@ -84,7 +90,8 @@
       <div class="drop" id="drop">Drop video or image files here, or click to choose<br>
         <span class="small">MP4/MOV/MKV/WebM, PNG/JPG/GIF/WebP</span></div>
       <div class="uploads" id="uploads"></div>
-      <div class="small muted" id="disk" style="margin-top:8px"></div>
+      <div class="small muted" id="hw-line" style="margin-top:8px"></div>
+      <div class="small muted" id="disk" style="margin-top:4px"></div>
     </div>
     <div class="card" style="margin-bottom:16px">
       <div class="row between"><h2>Event-specific</h2><input id="lib-filter" placeholder="Filter…"></div>
@@ -102,21 +109,21 @@
       <div class="card">
         <div class="row between">
           <h2>Cue list</h2>
-          <button class="primary" id="cue-add">Add cue</button>
+          <div class="row"><button id="cue-scenarios">Add standard scenarios</button><button class="primary" id="cue-add">Add cue</button></div>
         </div>
         <p class="small muted">Q-SYS (or anything else) triggers cues by number or label, e.g. <code>CUE 3</code> over TCP or <code>GET /api/cue/3</code>.
           A cue with several media items plays them as a sequence.</p>
         <div class="table-wrap">
           <table>
-            <thead><tr><th style="width:70px">#</th><th style="min-width:140px">Label</th><th style="min-width:240px">Media</th><th style="width:60px">Loop</th>
+            <thead><tr><th style="width:70px">#</th><th style="min-width:140px">Label</th><th style="min-width:240px">Media</th><th style="width:110px">Type</th><th style="width:50px" title="Locked: stays up until Normal, blocks other triggers">Lock</th><th style="width:60px">Loop</th>
               <th style="width:90px">Duration</th><th style="width:130px">Then</th><th style="width:60px">Colour</th><th></th></tr></thead>
             <tbody id="cue-rows"></tbody>
           </table>
         </div>
       </div>
       <div class="card" style="max-width:720px">
-        <h2>Default content</h2>
-        <p class="small muted">Plays whenever nothing has been triggered, and after a cue finishes (unless the cue says otherwise).</p>
+        <h2>Normal playlist — “Everything is normal”</h2>
+        <p class="small muted">The fallback: plays whenever no scenario or event cue is active, after a cue finishes, and when <b>Normal</b> is pressed (which also clears a locked scenario).</p>
         <div class="row" style="margin-bottom:10px">
           <label class="field"><span>Mode</span>
             <select id="def-mode"><option value="playlist">Playlist</option><option value="black">Black</option></select></label>
@@ -128,7 +135,7 @@
           <select id="def-add" style="flex:1"></select>
           <button id="def-add-btn">Add</button>
         </div>
-        <div class="row" style="margin-top:14px"><button class="primary" id="def-save">Save default content</button></div>
+        <div class="row" style="margin-top:14px"><button class="primary" id="def-save">Save normal playlist</button></div>
       </div>
     </div>
   </section>

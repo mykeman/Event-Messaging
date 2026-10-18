@@ -16,6 +16,10 @@ const SETTINGS_FORM = [
       ["out_width", "Out width", "number"], ["out_height", "Out height", "number"],
       ["connector_id", "DRM connector (kms)", "number"]] },
   { section: "ndi", title: "NDI output", fields: [["enabled", "Enabled", "check"], ["name", "Source name", "text", null, "wide"]] },
+  { section: "transcode", title: "Media conversion", note: "Files this unit would struggle to play (codec, size, frame rate, 10-bit, interlaced) get an optimised H.264 copy in the background. The original plays until it's ready.",
+    fields: [["mode", "Mode", "select", ["auto", "always", "off"]], ["keep_original", "Keep originals", "check"],
+      ["crf", "Quality (CRF)", "number"], ["preset", "Speed preset", "select", ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium"]],
+      ["threads", "Threads (0 = auto)", "number"]] },
   { section: "transition", title: "Transitions", fields: [["type", "Type", "select", ["fade", "cut"]], ["duration_ms", "Fade (ms)", "number"]] },
   { section: "audio", title: "Audio", note: "Video soundtracks to HDMI/ALSA and into NDI.",
     fields: [["enabled", "Enabled", "check"], ["sink", "Sink", "select", ["auto", "alsa", "pulse", "none"]], ["device", "ALSA device", "text"]] },
@@ -47,7 +51,10 @@ function renderStatus() {
   $("#canvas-info").textContent = (eng.canvas || "") + (eng.backend ? " · " + eng.backend : "");
   const errs = (eng.errors || []).slice(-3).reverse();
   $("#st-errors").replaceChildren(...errs.map(e => el("div", {}, new Date(e.t * 1000).toLocaleTimeString() + " " + e.msg)));
-  $$("#live-cues .cue-btn").forEach(b => b.classList.toggle("active", st.mode === "cue" && b.dataset.cue === st.cue));
+  $$("#live-cues .cue-btn, #live-scenarios .cue-btn").forEach(b => b.classList.toggle("active", ["cue", "hold"].includes(st.mode) && b.dataset.cue === st.cue));
+  $("#lock-banner").classList.toggle("hidden", !st.lock);
+  $("#lock-text").textContent = st.lock ? "🔒 " + (st.label || "Scenario") + " is active" : "";
+  if (st.mode === "default") $("#now-badge").replaceChildren(el("span", { class: "badge default" }, "normal"));
   $$(".media[data-id]").forEach(c => c.classList.toggle("playing", !!m && c.dataset.id === m.id));
   tickProgress();
 }
@@ -64,19 +71,25 @@ setInterval(tickProgress, 500);
 function cueLabel(n) { return (S.cues[n] || {}).label || ""; }
 
 function renderLiveCues() {
-  const box = $("#live-cues");
-  const entries = Object.entries(S.cues);
-  if (!entries.length) { box.replaceChildren(el("div", { class: "muted small" }, "No cues yet — add some on the Cues tab.")); return; }
-  box.replaceChildren(...entries.map(([n, c]) => {
+  const all = Object.entries(S.cues);
+  const fill = (box, entries, empty) => {
+    if (!entries.length) { box.replaceChildren(el("div", { class: "muted small" }, empty)); return; }
+    box.replaceChildren(...entries.map(cueButton));
+  };
+  fill($("#live-scenarios"), all.filter(([, c]) => c.group === "scenario"), "No scenarios — add the standard set on the Cues tab.");
+  fill($("#live-cues"), all.filter(([, c]) => c.group !== "scenario"), "No event cues yet — add some on the Cues tab.");
+  renderStatus();
+}
+
+function cueButton([n, c]) {
     const items = Array.isArray(c.media) ? c.media : (c.media ? [c.media] : []);
     const names = items.map(id => (S.media.find(m => m.id === id) || {}).name || "missing").join(" → ");
     return el("button", { class: "cue-btn", dataset: { cue: n }, style: c.color ? { borderColor: c.color } : null,
       onclick: () => api("POST", "/api/cue/" + encodeURIComponent(n)) },
       el("span", { class: "num" }, "CUE " + n),
       el("span", { class: "lbl" }, c.label || names || "(empty)"),
-      el("span", { class: "meta" }, [c.loop ? "loop" : "", c.after !== "default" ? "→ " + c.after : ""].filter(Boolean).join(" · ")));
-  }));
-  renderStatus();
+      el("span", { class: "meta" }, [c.lock ? "🔒 locked" : "", !items.length ? "no media" : "", c.loop ? "loop" : "",
+        c.after !== "default" && !c.loop ? "→ " + c.after : ""].filter(Boolean).join(" · ")));
 }
 
 function thumbUrl(m) { return m.has_thumb ? withToken("/api/media/" + m.id + "/thumb") : ""; }
@@ -129,6 +142,7 @@ function mediaCard(m) {
       el("div", { class: "name", title: m.original_filename }, m.name),
       el("div", { class: "small muted" }, meta),
       (m.tags || []).includes("master") ? el("div", {}, el("span", { class: "chip" }, "managed by master")) : null,
+      playbackLine(m),
       exp),
     el("div", { class: "actions" },
       el("button", { onclick: () => api("POST", "/api/play/" + m.id) }, "Play"),
@@ -141,6 +155,26 @@ function mediaCard(m) {
         } }, inDefault ? "− Default" : "+ Default"),
       el("button", { class: "danger", onclick: () => confirmDo(`Delete "${m.name}"?`, async () => {
         await api("DELETE", "/api/media/" + m.id); toast("Deleted", "ok"); }) }, "Delete")));
+}
+
+/* Conversion status for a media item */
+function playbackLine(m) {
+  const pb = m.playback || {};
+  const why = (pb.reasons || []).join("; ");
+  const t = pb.target;
+  const tdesc = t ? (t.kind === "video" ? `H.264 ${t.width}×${t.height}@${t.fps}` : `${t.format.toUpperCase()} ${t.width}×${t.height}`) : "";
+  switch (pb.status) {
+    case "queued": return el("div", { class: "small", style: { color: "var(--warn)" }, title: why }, "⏳ Queued for conversion (playing original)");
+    case "converting": return el("div", { class: "small", title: why },
+      el("div", { style: { color: "var(--warn)" } }, `Converting to ${tdesc} · ${Math.round(pb.progress || 0)}%`),
+      el("div", { class: "progress" }, el("div", { style: { width: (pb.progress || 0) + "%" } })));
+    case "ready": return el("div", { class: "small", style: { color: "var(--ok)" }, title: why }, `✓ Optimised: ${tdesc}`);
+    case "failed": return el("div", { class: "small expiry", title: pb.error || "" }, "Conversion failed — playing original");
+    default:
+      if (pb.skip && why) return el("div", { class: "small muted", title: why }, "Playing original (conversion turned off for this file)");
+      if (pb.disabled && why) return el("div", { class: "small", style: { color: "var(--warn)" }, title: why }, "May not play smoothly (conversion is off)");
+      return null;
+  }
 }
 
 function renderLibrary() {
@@ -166,7 +200,15 @@ function editMedia(m) {
           el("select", { name: "scale_mode" }, ...["", "fit", "fill", "stretch", "none"].map(v =>
             el("option", { value: v, selected: (m.scale_mode || "") === v }, v || "Use default")))),
         el("label", { class: "field" }, el("span", {}, "Auto-delete after"), el("input", { type: "date", name: "expires", value: m.expires || "" }))),
-      el("div", { class: "small muted" }, `ID ${m.id} · ${m.original_filename}` + (m.codec ? " · " + m.codec : "")),
+      el("div", { class: "small muted" }, `ID ${m.id} · ${m.original_filename}` + (m.codec ? " · " + m.codec : "") +
+        (m.probe && m.probe.fps ? ` · ${m.probe.fps} fps` : "") + (m.probe && m.probe.pix_fmt ? " · " + m.probe.pix_fmt : "")),
+      (m.playback && (m.playback.reasons || []).length) ? el("div", { class: "small" },
+        el("b", {}, "Conversion: "), m.playback.reasons.join("; "), m.playback.error ? el("div", { class: "expiry" }, m.playback.error) : null) : null,
+      el("div", { class: "row" },
+        el("button", { type: "button", onclick: async () => { await api("POST", `/api/media/${m.id}/convert`); toast("Conversion queued", "ok"); } },
+          (m.playback || {}).status === "ready" ? "Re-convert" : "Convert now"),
+        (m.playback || {}).status === "ready" || ["queued", "converting"].includes((m.playback || {}).status) ?
+          el("button", { type: "button", onclick: async () => { await api("DELETE", `/api/media/${m.id}/converted`); toast("Playing the original", "ok"); } }, "Use original") : null),
       el("div", { class: "row" },
         el("button", { class: "primary", value: "save" }, "Save"),
         el("button", { value: "cancel" }, "Cancel"),
@@ -229,6 +271,9 @@ function cueRow(num, c, isNew) {
     el("td", {}, el("input", { class: "cue-num", value: num, disabled: !isNew })),
     el("td", {}, el("input", { class: "cue-label", value: c.label || "", placeholder: "Label" })),
     el("td", {}, mediaBox, el("button", { class: "small icon", type: "button", style: { marginTop: "4px" }, onclick: () => addSel("") }, "+ sequence")),
+    el("td", {}, el("select", { class: "cue-group" }, el("option", { value: "event", selected: c.group !== "scenario" }, "Event"),
+      el("option", { value: "scenario", selected: c.group === "scenario" }, "Scenario"))),
+    el("td", {}, el("input", { type: "checkbox", class: "cue-lock", checked: !!c.lock })),
     el("td", {}, el("input", { type: "checkbox", class: "cue-loop", checked: !!c.loop })),
     el("td", {}, el("input", { type: "number", class: "cue-dur", min: 0, step: "0.1", value: c.duration || "", placeholder: "auto" })),
     el("td", {}, afterSel),
@@ -249,7 +294,8 @@ async function saveCue(tr) {
   await api("PUT", "/api/cues/" + encodeURIComponent(num), {
     label: $(".cue-label", tr).value, media: media.length > 1 ? media : (media[0] || null),
     loop: $(".cue-loop", tr).checked, duration: $(".cue-dur", tr).value || null,
-    after: $(".cue-after", tr).value, color: color === "#2a2f3a" ? "" : color });
+    after: $(".cue-after", tr).value, color: color === "#2a2f3a" ? "" : color,
+    group: $(".cue-group", tr).value, lock: $(".cue-lock", tr).checked });
   toast("Cue " + num + " saved", "ok");
 }
 
@@ -343,13 +389,20 @@ async function saveSettings() {
 
 async function loadInfo() {
   S.info = await api("GET", "/api/info");
+  try { S.hw = await api("GET", "/api/hardware", undefined, { quiet: true }); } catch { S.hw = null; }
+  if (S.hw) {
+    const out = S.settings.output, tc = S.settings.transcode || {};
+    $("#hw-line").textContent = `This unit: ${S.hw.summary}. ` + (tc.mode === "off" ? "Conversion is off." :
+      `Files are optimised for ${out.canvas_width}×${out.canvas_height}@${out.framerate} H.264` + (S.hw.converting ? " · converting now" : "") + (S.hw.queued ? ` · ${S.hw.queued} queued` : "") + ".");
+  }
   $("#unit-name").textContent = S.info.name;
   document.title = "CuePlayer · " + S.info.name;
   const sys = S.info.system || {}, disk = S.info.disk || {};
   const rows = [["Name", S.info.name], ["Version", S.info.version], ["Host", sys.hostname],
     ["CPU temp", sys.cpu_temp_c ? sys.cpu_temp_c + " °C" : "—"], ["Load", (sys.load || []).map(n => n.toFixed(2)).join(" ")],
     ["Uptime", sys.uptime_s ? fmtDur(sys.uptime_s) : "—"], ["Library", fmtBytes(disk.library_bytes)], ["Free disk", fmtBytes(disk.free_bytes)],
-    ["Engine", S.status ? S.status.engine.backend + " " + (S.status.engine.gst_version || "") : "—"]];
+    ["Engine", S.status ? S.status.engine.backend + " " + (S.status.engine.gst_version || "") : "—"],
+    ["Hardware", S.hw ? S.hw.model : "—"], ["HW decode", S.hw ? Object.keys(S.hw.hw_decoders).join(", ").toUpperCase() || "none" : "—"]];
   $("#sysinfo").replaceChildren(...rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v ?? "—")]));
   $("#disk").textContent = `Library ${fmtBytes(disk.library_bytes)} · ${fmtBytes(disk.free_bytes)} free`;
 }
@@ -400,6 +453,11 @@ async function init() {
     const nums = Object.keys(S.cues).filter(n => /^\d+$/.test(n)).map(Number);
     const next = String(nums.length ? Math.max(...nums) + 1 : 1);
     $("#cue-rows").append(cueRow(next, { loop: false, after: "default" }, true));
+  };
+  $("#lock-clear").onclick = () => api("POST", "/api/normal");
+  $("#cue-scenarios").onclick = async () => {
+    const r = await api("POST", "/api/cues/scenarios");
+    toast(r.added.length ? `Added ${r.added.length} scenarios (101–109) — assign media to each` : "All standard scenarios are already present", "ok");
   };
   $("#def-add-btn").onclick = () => { const v = $("#def-add").value; if (v) { S.defList.push(v); renderDefault(); } };
   $("#def-save").onclick = async () => {
