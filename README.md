@@ -49,7 +49,25 @@ The script installs GStreamer, ffmpeg and the app into `/opt/cueplayer`, with me
 
 You can skip NDI and add it later. The player runs without it and reports `NDI: unavailable`.
 
-**For direct-to-HDMI output with no desktop**, boot to console (`sudo systemctl set-default multi-user.target`) and leave the video sink on `auto` (it picks `kms`). On a machine with a desktop session, `auto` uses the desktop's video sink instead.
+#### Dedicated display (appliance mode)
+
+A plain install drives HDMI only while the player is running. Boot messages and the console login prompt still appear on the screen at boot, while the video pipeline restarts after an error, and whenever the service is stopped. If the display or LED processor isn't on at boot, the Pi may also never enable HDMI. For a screen that shows only CuePlayer content, add `--take-hdmi`:
+
+```bash
+sudo ./deploy/install.sh --with-ndi --take-hdmi --hdmi-mode 1920x1080@60 --hdmi-port HDMI-A-1
+sudo reboot
+```
+
+This:
+
+- hides the boot text, logo and cursor, moves the local console to tty3 and removes the login prompt from the screen (manage the unit over SSH),
+- forces the HDMI port on at the given mode, even with no display connected or no EDID at boot,
+- disables the splash screen and any desktop, and
+- sets the player to direct KMS output at that mode. Your other settings are kept.
+
+`--hdmi-mode` defaults to `1920x1080@60` and `--hdmi-port` to `HDMI-A-1`. Use `HDMI-A-2` for the second port on a Pi 4 or 5. The flag works on Raspberry Pi OS (it edits `cmdline.txt` and `config.txt`) and on x86 machines that boot with GRUB. It backs up every boot file it changes to `*.cueplayer.bak`. To undo it, restore those backups and run `sudo systemctl unmask getty@tty1.service autovt@tty1.service`.
+
+Without `--take-hdmi`, boot to console (`sudo systemctl set-default multi-user.target`) and leave the video sink on `auto`, which picks `kms`. On a machine with a desktop session, `auto` uses the desktop's video sink instead.
 
 ### Master server
 

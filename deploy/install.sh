@@ -4,12 +4,22 @@
 #   sudo ./deploy/install.sh                  # screen endpoint (player)
 #   sudo ./deploy/install.sh --role master    # master server VM (no video stack)
 #   sudo ./deploy/install.sh --with-ndi       # also install NDI output (see install-ndi.sh)
+#   sudo ./deploy/install.sh --take-hdmi      # dedicate the HDMI output to CuePlayer (appliance mode)
+#        [--hdmi-mode 1920x1080@60]           #   force this mode, even with no display/EDID at boot
+#        [--hdmi-port HDMI-A-1]               #   which port to force on (HDMI-A-2 = 2nd port on Pi 4/5)
+#
+# --take-hdmi: no boot text, logo, cursor or login prompt on HDMI, no desktop, HDMI forced
+# on at the given mode, and the player set to direct KMS output. Needs a reboot.
+# Log in over SSH afterwards (the local console moves to tty3, Ctrl+Alt+F3).
 #
 # Re-running upgrades the app in place; media and settings in /var/lib/cueplayer are kept.
 set -euo pipefail
 
 ROLE=player
 WITH_NDI=0
+TAKE_HDMI=0
+HDMI_MODE=1920x1080@60
+HDMI_PORT=HDMI-A-1
 PREFIX=/opt/cueplayer
 DATA=/var/lib/cueplayer
 SVC_USER=cueplayer
@@ -18,14 +28,23 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --role) ROLE="$2"; shift 2 ;;
     --with-ndi) WITH_NDI=1; shift ;;
+    --take-hdmi) TAKE_HDMI=1; shift ;;
+    --hdmi-mode) HDMI_MODE="$2"; shift 2 ;;
+    --hdmi-port) HDMI_PORT="$2"; shift 2 ;;
     --prefix) PREFIX="$2"; shift 2 ;;
     --data) DATA="$2"; shift 2 ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "unknown option $1"; exit 1 ;;
   esac
 done
 [[ "$ROLE" == player || "$ROLE" == master ]] || { echo "--role must be player or master"; exit 1; }
 [[ $EUID -eq 0 ]] || { echo "run with sudo"; exit 1; }
+if [[ "$TAKE_HDMI" == 1 ]]; then
+  [[ "$ROLE" == player ]] || { echo "--take-hdmi only applies to --role player"; exit 1; }
+  [[ "$HDMI_MODE" =~ ^([0-9]+)x([0-9]+)@([0-9]+)$ ]] || { echo "--hdmi-mode must look like 1920x1080@60"; exit 1; }
+  HDMI_W=${BASH_REMATCH[1]}; HDMI_H=${BASH_REMATCH[2]}
+  [[ "$HDMI_PORT" =~ ^HDMI-A-[0-9]$ ]] || { echo "--hdmi-port must look like HDMI-A-1"; exit 1; }
+fi
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 echo "==> Installing CuePlayer ($ROLE) from $SRC to $PREFIX"
@@ -95,11 +114,77 @@ if [[ "$ROLE" == player ]]; then
   if [[ -f /boot/firmware/cmdline.txt ]] && ! grep -q consoleblank=0 /boot/firmware/cmdline.txt; then
     sed -i 's/$/ consoleblank=0/' /boot/firmware/cmdline.txt
   fi
-  if systemctl is-enabled display-manager >/dev/null 2>&1; then
+  if [[ "$TAKE_HDMI" == 0 ]] && systemctl is-enabled display-manager >/dev/null 2>&1; then
     echo "!! A desktop (display manager) is enabled. For direct KMS output set the"
     echo "   video sink to 'kms' and boot to console:  sudo systemctl set-default multi-user.target"
     echo "   or keep the desktop and use video sink 'auto'/'gl'."
   fi
+fi
+
+# ---- appliance mode: dedicate HDMI to the player -------------------------------
+NEED_REBOOT=0
+if [[ "$TAKE_HDMI" == 1 ]]; then
+  echo "==> Dedicating $HDMI_PORT to CuePlayer at $HDMI_MODE"
+  # Kernel command line: console off tty1, quiet boot, no logo/cursor/blanking, HDMI forced on.
+  # The "D" suffix on video= enables the output even if no display is detected at boot
+  # (LED processors are often powered up after the player, or have unreliable EDID).
+  edit_cmdline() {
+    python3 - "$1" "$HDMI_PORT" "$HDMI_MODE" <<'EOF'
+import sys
+path, port, mode = sys.argv[1:4]
+toks = open(path).read().split()
+toks = [t for t in toks if not (t.startswith("video=" + port + ":") or t in ("console=tty1", "console=tty3", "quiet")
+        or t.split("=")[0] in ("loglevel", "logo.nologo", "vt.global_cursor_default", "consoleblank"))]
+toks += ["console=tty3", "quiet", "loglevel=3", "logo.nologo", "vt.global_cursor_default=0",
+         "consoleblank=0", f"video={port}:{mode}D"]
+open(path, "w").write(" ".join(toks) + "\n")
+EOF
+  }
+  CMDLINE=""
+  for f in /boot/firmware/cmdline.txt /boot/cmdline.txt; do [[ -f "$f" ]] && { CMDLINE=$f; break; }; done
+  if [[ -n "$CMDLINE" ]]; then                       # Raspberry Pi
+    [[ -f "$CMDLINE.cueplayer.bak" ]] || cp "$CMDLINE" "$CMDLINE.cueplayer.bak"
+    edit_cmdline "$CMDLINE"
+    CONFIG="$(dirname "$CMDLINE")/config.txt"
+    if [[ -f "$CONFIG" ]]; then
+      [[ -f "$CONFIG.cueplayer.bak" ]] || cp "$CONFIG" "$CONFIG.cueplayer.bak"
+      grep -q '^disable_splash=1' "$CONFIG" || echo "disable_splash=1" >> "$CONFIG"   # no rainbow screen
+      grep -q '^dtoverlay=vc4-kms-v3d' "$CONFIG" || \
+        echo "!! $CONFIG has no dtoverlay=vc4-kms-v3d - direct KMS output needs it (Bookworm default)"
+    fi
+  elif [[ -f /etc/default/grub ]]; then              # x86 PC / VM with GRUB
+    [[ -f /etc/default/grub.cueplayer.bak ]] || cp /etc/default/grub /etc/default/grub.cueplayer.bak
+    TMP=$(mktemp)
+    sed -n 's/^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"$/\1/p' /etc/default/grub > "$TMP"
+    edit_cmdline "$TMP"
+    NEW=$(cat "$TMP"); rm -f "$TMP"
+    sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$NEW\"|" /etc/default/grub
+    update-grub
+  else
+    echo "!! No Pi cmdline.txt or GRUB config found - skipping boot-console changes"
+  fi
+
+  # No login prompt on the screen (SSH still works)
+  systemctl mask getty@tty1.service autovt@tty1.service >/dev/null 2>&1 || true
+  # No desktop competing for the display
+  if [[ "$(systemctl get-default)" == graphical.target ]]; then
+    systemctl set-default multi-user.target
+    echo "    Desktop disabled (boot to console). Undo: sudo systemctl set-default graphical.target"
+  fi
+
+  # Player output: direct KMS at the HDMI mode (keeps any other existing settings)
+  python3 - "$DATA/settings.json" "$HDMI_W" "$HDMI_H" <<'EOF'
+import json, sys
+path, w, h = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+try:
+    data = json.load(open(path))
+except (OSError, ValueError):
+    data = {}
+data.setdefault("display", {}).update(enabled=True, sink="kms", width=w, height=h)
+json.dump(data, open(path, "w"), indent=2)
+EOF
+  chown "$SVC_USER:$SVC_USER" "$DATA/settings.json"
+  NEED_REBOOT=1
 fi
 
 systemctl daemon-reload
@@ -116,4 +201,10 @@ echo
 echo "==> CuePlayer ($ROLE) is running:  http://${IP:-<this-host>}:8080/"
 echo "    TCP control port 7700, UDP 7701.  Logs: journalctl -u cueplayer -f"
 [[ "$ROLE" == player && "$WITH_NDI" == 0 ]] && echo "    NDI output: run  sudo $SRC/deploy/install-ndi.sh"
+if [[ "$NEED_REBOOT" == 1 ]]; then
+  echo
+  echo "==> HDMI takeover configured. Reboot to apply:  sudo reboot"
+  echo "    Undo: restore the *.cueplayer.bak boot files and"
+  echo "          sudo systemctl unmask getty@tty1.service autovt@tty1.service"
+fi
 exit 0
