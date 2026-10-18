@@ -169,6 +169,7 @@ class GstEngine(BaseEngine):
         self._thread.start()
         self._restart_timer = None
         self._disabled_outputs: set = set()   # outputs switched off after repeated failures
+        self._orig_ranks: Dict[str, int] = {}
         self._fail_counts: Dict[str, int] = {}
 
     # ---- thread marshalling ------------------------------------------------
@@ -256,9 +257,32 @@ class GstEngine(BaseEngine):
         self.current = None
         self.status["running"] = False
 
+    # Hardware decoders that are safe to prefer when present. Most are registered below
+    # the software decoders by default, so decodebin would otherwise pick avdec_*.
+    HW_DECODERS = (
+        "v4l2h264dec", "v4l2h265dec",          # Raspberry Pi 4 (stateful V4L2)
+        "v4l2slh264dec", "v4l2slh265dec",      # stateless V4L2 (Pi 5 HEVC, others)
+        "vah264dec", "vah265dec", "vavp9dec",  # Intel/AMD VA-API (x86 mini PCs)
+        "nvh264dec", "nvh265dec",              # NVIDIA
+    )
+
+    def _apply_decoder_ranks(self, enabled: bool) -> None:
+        reg = Gst.Registry.get()
+        found = []
+        for name in self.HW_DECODERS:
+            f = reg.lookup_feature(name)
+            if f is None:
+                continue
+            self._orig_ranks.setdefault(name, f.get_rank())
+            f.set_rank(Gst.Rank.PRIMARY + 100 if enabled else self._orig_ranks[name])
+            found.append(name)
+        self.status["hw_decoders"] = found if enabled else []
+
     def _build(self, settings: Dict[str, Any]) -> None:
         self._teardown()
         self.settings = settings
+        self._apply_decoder_ranks(bool(settings["output"].get("hw_decode", True)))
+        self.status.update(video_decoder=None, frames_rendered=0, frames_dropped=0)
         out, disp, ndi = settings["output"], settings["display"], settings["ndi"]
         audio, prev = settings["audio"], settings["preview"]
         cw, ch, fps = int(out["canvas_width"]), int(out["canvas_height"]), int(out["framerate"])
@@ -276,8 +300,11 @@ class GstEngine(BaseEngine):
         if self.comp.find_property("ignore-inactive-pads"):
             self.comp.set_property("ignore-inactive-pads", True)
         tee = self._make("tee", "vtee", allow_not_linked=True)
-        bgcaps = self._caps(vcaps + ",format=AYUV")
-        outcaps = self._caps(vcaps)
+        # Compose in I420, the format decoders produce. Decoded frames then pass through
+        # without conversion, and the compositor skips the background whenever an opaque
+        # full-canvas clip covers it. (Fades still work through the pad alpha.)
+        bgcaps = self._caps(vcaps + ",format=I420")
+        outcaps = self._caps(vcaps + ",format=I420")
         self._chain(bg, bgcaps)
         self.pipeline.add(self.comp)
         bgpad = self._req(self.comp)
@@ -390,6 +417,12 @@ class GstEngine(BaseEngine):
             sink = self._make("autovideosink")
         sink.set_property("sync", True)
         sink.set_name("display_sink")
+        # Time allowed for compositing/conversion before a frame counts as late. Without it a
+        # live pipeline gives ~20 ms, and on slower hardware nearly every frame is dropped
+        # (the sink then shows only one late frame per second).
+        if sink.find_property("processing-deadline"):
+            sink.set_property("processing-deadline",
+                              int(self.settings["output"].get("latency_ms", 100)) * Gst.MSECOND)
 
         els = [self._make("queue", max_size_buffers=3, leaky=2), self._make("videoconvert")]
         if (ow, oh) != (cw, ch):
@@ -434,8 +467,8 @@ class GstEngine(BaseEngine):
     def _build_ndi(self, tee, atee, ndi) -> None:
         name = ndi.get("name") or "CuePlayer"
         sink = self._make("ndisink", "ndi_sink", ndi_name=name)
-        vq = [self._make("queue", leaky=2, max_size_buffers=2), self._make("videoconvert"),
-              self._caps("video/x-raw,format=UYVY")]
+        # videoconvert is a passthrough when ndisink accepts I420 (it does), so no per-frame cost
+        vq = [self._make("queue", leaky=2, max_size_buffers=2), self._make("videoconvert")]
         if atee is not None and self._has("ndisinkcombiner"):
             comb = self._make("ndisinkcombiner")
             self._branch(tee, *vq)
@@ -533,6 +566,12 @@ class GstEngine(BaseEngine):
             if achain and not linked["audio"]:
                 achain[0].get_static_pad("sink").send_event(Gst.Event.new_eos())
 
+        def on_element(_bin, _sub, el):
+            f = el.get_factory()
+            if f and "Decoder/Video" in (f.get_metadata("klass") or ""):
+                self.status["video_decoder"] = f.get_name()
+
+        b.connect("deep-element-added", on_element)
         src.connect("pad-added", on_pad)
         src.connect("no-more-pads", no_more_pads)
 
@@ -699,6 +738,9 @@ class GstEngine(BaseEngine):
                     self._disabled_outputs.add(out)
                     self._fail_counts[out] = 0
             self._schedule_restart()
+        elif t == Gst.MessageType.QOS and msg.src.get_name() == "display_sink":
+            _fmt, processed, dropped = msg.parse_qos_stats()
+            self.status.update(frames_rendered=processed, frames_dropped=dropped)
         elif t == Gst.MessageType.WARNING:
             w, _ = msg.parse_warning()
             log.warning("gst warning from %s: %s", msg.src.get_name(), w.message)

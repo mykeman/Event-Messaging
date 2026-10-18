@@ -7,7 +7,8 @@ const SETTINGS_FORM = [
     presets: [["1920×1080", 1920, 1080], ["1280×720", 1280, 720], ["3840×2160", 3840, 2160], ["1080×1920", 1080, 1920]],
     fields: [["canvas_width", "Width", "number"], ["canvas_height", "Height", "number"],
       ["framerate", "Frame rate", "select", [24, 25, 30, 50, 60]], ["background", "Background", "color"],
-      ["scale_mode", "Scale media", "select", ["fit", "fill", "stretch", "none"]]] },
+      ["scale_mode", "Scale media", "select", ["fit", "fill", "stretch", "none"]],
+      ["hw_decode", "Hardware decode", "check"], ["latency_ms", "Latency budget (ms)", "number"]] },
   { section: "display", title: "Display output (HDMI)", note: "Display mode and where the canvas is placed. Out width/height 0 = canvas size (1:1).",
     fields: [["enabled", "Enabled", "check"], ["sink", "Video sink", "select", ["auto", "kms", "gl", "x", "wayland", "fb", "none"]],
       ["width", "Display width", "number"], ["height", "Display height", "number"],
@@ -39,6 +40,10 @@ function renderStatus() {
   const eng = st.engine || {};
   $("#st-ndi").textContent = eng.ndi || "—";
   $("#st-display").textContent = eng.display || "—";
+  $("#st-decoder").textContent = eng.video_decoder ? eng.video_decoder + (/^(avdec|vp8dec|vp9dec|dav1d|openh264)/.test(eng.video_decoder) ? " (software)" : " (hardware)") : "—";
+  const dropped = eng.frames_dropped || 0;
+  $("#st-frames").textContent = eng.frames_rendered || dropped ? `${dropped} dropped` : "—";
+  $("#st-frames").style.color = dropped ? "var(--warn)" : "";
   $("#canvas-info").textContent = (eng.canvas || "") + (eng.backend ? " · " + eng.backend : "");
   const errs = (eng.errors || []).slice(-3).reverse();
   $("#st-errors").replaceChildren(...errs.map(e => el("div", {}, new Date(e.t * 1000).toLocaleTimeString() + " " + e.msg)));
@@ -415,6 +420,11 @@ async function init() {
     $("#conn-text").textContent = on ? "live" : "reconnecting";
   });
   setInterval(loadInfo, 30000);
+  // Engine stats (decoder, dropped frames) change between playback events
+  setInterval(async () => {
+    if (document.hidden || !$("#tab-live").classList.contains("active")) return;
+    try { S.status = await api("GET", "/api/status", undefined, { quiet: true }); renderStatus(); } catch {}
+  }, 3000);
 }
 
 initTabs(name => { if (name === "live") startPreview(); });

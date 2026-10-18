@@ -18,6 +18,11 @@ DEFAULTS: Dict[str, Any] = {
         "background": "#000000",
         # How media is fitted into the canvas: fit | fill | stretch | none
         "scale_mode": "fit",
+        # Prefer hardware video decoders (Pi V4L2, VA-API, NVIDIA) when available
+        "hw_decode": True,
+        # Processing time allowed per frame before it is dropped as late (ms). Raise it
+        # if the Live tab shows dropped frames; it adds the same delay to every output.
+        "latency_ms": 100,
     },
     "display": {
         # Physical output (HDMI). The canvas is placed into the display raster at

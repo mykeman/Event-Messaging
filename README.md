@@ -80,6 +80,16 @@ sudo ./deploy/install.sh --role master
 
 Then on each player, open **Settings → Master server** and set the *Master URL* (e.g. `http://10.10.20.5:8080`), plus the *Master token* if the master has one. The player registers itself and appears on the master's **Screens** tab. You can also add screens by hand on the master.
 
+### Updating an installed unit
+
+From the cloned repository on the Pi or VM:
+
+```bash
+cd Event-Messaging && sudo ./deploy/update.sh
+```
+
+This pulls the latest code, updates `/opt/cueplayer` and restarts the service. Media, settings and the service setup are kept, and if the new version fails to start it rolls back to the previous one. Re-run `deploy/install.sh` instead when you need new OS packages or install options such as `--take-hdmi`.
+
 ### Development / trying it out (no GStreamer)
 
 ```bash
@@ -106,7 +116,13 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 The Settings tab shows a live diagram of the canvas inside the display raster. Saving output settings restarts the video pipeline, which blanks the screen for about a second.
 
-**Raspberry Pi notes:** use 25 or 30 fps and keep the canvas at 1080p or below. Encode media as H.264 1080p (or HEVC on a Pi 5, which has no H.264 hardware decoder). Pre-scaling content to the canvas size saves CPU. NDI encoding is CPU-heavy, so a Pi 5 or an x86 mini PC is the better choice when you need NDI at full rate.
+**Smooth playback:**
+
+- Match the canvas frame rate to your content and the HDMI mode to the canvas. For 50 fps video, use a 50 fps canvas and `--hdmi-mode 1920x1080@50`. A 50 fps video on a 30 fps canvas or a 60 Hz output will judder.
+- The Live tab shows the **decoder** in use and the number of **dropped frames**. If frames are being dropped, raise *Latency budget (ms)* in Settings → Canvas. If the decoder says *software*, check the codec: a Pi 4 decodes H.264 in hardware, a Pi 5 only HEVC (H.265).
+- NDI encoding is CPU-heavy. If playback is uneven with NDI on, test with NDI disabled. A Pi 5 or an x86 mini PC is the better choice when you need NDI at full rate.
+- Keep the canvas at 1080p or below on a Pi, and pre-scale content to the canvas size where you can.
+- Media is composed without per-pixel transparency, so transparent areas of PNGs show as black.
 
 ---
 
