@@ -38,7 +38,7 @@ If the master is offline, every screen keeps playing and can still be controlled
 Raspberry Pi OS Lite (Bookworm, 64-bit), Debian 12+ or Ubuntu 22.04+:
 
 ```bash
-git clone <this repo> cueplayer && cd cueplayer
+git clone https://github.com/mykeman/Event-Messaging.git && cd Event-Messaging
 sudo ./deploy/install.sh --with-ndi
 ```
 
@@ -56,6 +56,7 @@ You can skip NDI and add it later. The player runs without it and reports `NDI: 
 On any small Linux VM (it needs no GPU or video stack):
 
 ```bash
+git clone https://github.com/mykeman/Event-Messaging.git && cd Event-Messaging
 sudo ./deploy/install.sh --role master
 ```
 
