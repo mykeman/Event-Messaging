@@ -6,7 +6,7 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Any, Dict, Set
+from typing import Any, Callable, Dict, Set
 
 DEFAULTS: Dict[str, Any] = {
     "output": {
@@ -47,6 +47,22 @@ DEFAULTS: Dict[str, Any] = {
         "enabled": False,
         "sink": "auto",   # auto | alsa | pulse | none
         "device": "",     # alsa device, e.g. hw:0,0 (HDMI)
+    },
+    "aes67": {
+        # Native AES67 / SMPTE 2110-30 audio output (RTP multicast, PTP-locked). Needs audio
+        # enabled. Off by default; untested on real AES67 hardware - see README.
+        "enabled": False,
+        "multicast": "",        # blank = 239.69.<c>.<d> from this unit's a.b.c.d
+        "port": 5004,
+        "channels": 2,          # 1 or 2 (the player mix is stereo)
+        "bit_depth": 24,        # 24 (L24, AES67 standard) or 16 (L16)
+        "ptime_ms": 1,          # packet time; 1 ms is what every AES67 receiver supports
+        "ptp_domain": 0,        # must match the Q-SYS Core's PTP domain
+        "ttl": 32,
+        "dscp": 34,             # QoS marking for media packets (AF41)
+        "interface": "",        # network interface for PTP + media, e.g. eth0 (blank = default route)
+        "session_name": "",     # blank = "<screen name> audio"
+        "sap": True,            # announce via SAP so Q-SYS / Dante Controller discover it
     },
     "transition": {
         "type": "fade",   # fade | cut
@@ -93,7 +109,12 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 # Changes to these sections require the GStreamer pipeline to be rebuilt.
-PIPELINE_SECTIONS = ("output", "display", "ndi", "audio", "preview")
+PIPELINE_SECTIONS = ("output", "display", "ndi", "audio", "aes67", "preview")
+
+
+def _validators() -> Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]]:
+    from . import aes67
+    return {"aes67": aes67.validate}
 
 
 def _merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -127,12 +148,18 @@ class Settings:
             return copy.deepcopy(self._data[name])
 
     def update(self, patch: Dict[str, Any]) -> Set[str]:
-        """Deep-merge a partial settings dict. Returns the names of changed sections."""
+        """Deep-merge a partial settings dict. Returns the names of changed sections.
+
+        Raises ValueError (and changes nothing) when a section fails validation."""
         with self._lock:
             before = copy.deepcopy(self._data)
             # Only allow known top-level sections
             clean = {k: v for k, v in patch.items() if k in DEFAULTS and isinstance(v, dict)}
-            self._data = _merge(self._data, clean)
+            merged = _merge(self._data, clean)
+            for name, fn in _validators().items():
+                if name in clean:
+                    merged[name] = fn(merged[name])  # ValueError -> nothing is changed
+            self._data = merged
             changed = {k for k in DEFAULTS if before.get(k) != self._data.get(k)}
         self.save()
         return changed

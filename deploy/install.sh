@@ -60,7 +60,21 @@ if [[ "$ROLE" == player ]]; then
   # Optional on some distros
   apt-cache show gstreamer1.0-pulseaudio >/dev/null 2>&1 && PKGS+=(gstreamer1.0-pulseaudio)
 fi
+[[ "$ROLE" == player ]] && PKGS+=(libcap2-bin)
 apt-get install -y --no-install-recommends "${PKGS[@]}"
+
+# AES67 output: GStreamer's PTP clock runs gst-ptp-helper, which must bind the PTP ports
+# 319/320. Give it the capabilities rather than running CuePlayer as root.
+if [[ "$ROLE" == player ]]; then
+  PTP_HELPER=$(find /usr/libexec /usr/lib -name gst-ptp-helper -type f 2>/dev/null | head -n1)
+  if [[ -n "$PTP_HELPER" ]]; then
+    setcap cap_net_bind_service,cap_net_admin+ep "$PTP_HELPER" \
+      && echo "==> PTP helper ready: $PTP_HELPER" \
+      || echo "!! could not setcap $PTP_HELPER - AES67 output will not get PTP"
+  else
+    echo "!! gst-ptp-helper not found - AES67 output will not get PTP"
+  fi
+fi
 
 # Service user with access to the display (DRM/KMS) and audio devices
 if ! id "$SVC_USER" >/dev/null 2>&1; then

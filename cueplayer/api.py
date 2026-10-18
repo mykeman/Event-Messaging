@@ -273,9 +273,25 @@ def create_player_app(ctrl: Controller) -> FastAPI:
         body = await request.json()
         if not isinstance(body, dict):
             raise HTTPException(400, "expected an object")
-        out = ctrl.apply_settings(body)
+        try:
+            out = ctrl.apply_settings(body)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
         bus.publish({"event": "settings"})
         return out
+
+    # ---- AES67 ------------------------------------------------------------
+    @app.get("/api/aes67.sdp", dependencies=[api])
+    def aes67_sdp():
+        """SDP of the AES67 audio stream, for receivers that don't use SAP discovery."""
+        if not settings.section("aes67").get("enabled"):
+            raise HTTPException(404, "AES67 output is disabled")
+        sdp = ctrl.engine.aes67_sdp()
+        if not sdp:
+            state = (ctrl.engine.status.get("aes67") or {}).get("state", "not running")
+            raise HTTPException(503, f"AES67 stream not running: {state}")
+        return Response(sdp, media_type="application/sdp",
+                        headers={"Content-Disposition": 'inline; filename="cueplayer.sdp"'})
 
     # ---- preview ----------------------------------------------------------
     @app.get("/api/preview.jpg", dependencies=[api])

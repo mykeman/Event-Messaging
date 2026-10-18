@@ -12,6 +12,7 @@ CuePlayer is for places that run a rotation of standard messaging and need to sw
 - **Automatic media conversion**: each unit checks its own hardware and converts files it would struggle to play (codec, size, frame rate, 10-bit, interlaced) to an optimised H.264 copy in the background.
 - **Custom output raster**: compose at the LED processor's exact pixel map, with fit/fill/stretch/1:1 scaling per item, and place the canvas anywhere in the HDMI raster (with optional rescale).
 - **NDI output** of the canvas for monitoring and remote displays, plus a live preview in the web GUI.
+- **AES67 audio output** (optional, off by default, not yet bench-tested): the audio mix as a PTP-locked AES67 multicast stream that a Q-SYS Core can receive directly.
 - **Standalone or fleet**: each screen is a complete, autonomous unit. Optionally add a **master server** VM to manage many screens: groups, one trigger to many screens, global cues and media distribution.
 - Runs on Linux: a VM, a small x86 PC, or a Raspberry Pi 4/5.
 
@@ -197,6 +198,7 @@ PATCH/DELETE /api/media/{id}
 GET  /api/cues           PUT /api/cues/{n}      DELETE /api/cues/{n}
 GET  /api/settings       PATCH /api/settings
 GET  /api/preview.jpg    GET /api/preview.mjpg   WS /api/ws
+GET  /api/aes67.sdp      SDP of the AES67 audio stream (404 when off, 503 until PTP is locked)
 ```
 
 Master:
@@ -208,6 +210,35 @@ GET  /api/screens        POST /api/screens       PATCH/DELETE /api/screens/{id}
 POST /api/media (file, category, targets=all,group:east)    POST /api/sync
 GET/PUT/DELETE /api/gcues/{n}       GET/PUT/DELETE /api/cues/{n} (shared player cue list)
 ```
+
+### AES67 audio into Q-SYS
+
+> **Untested on real AES67 hardware.** The AES67 output is written against GStreamer's RTP and PTP elements and its SDP/SAP output is unit-tested, but it has not yet been run against a Q-SYS Core. Bench-test it (PTP lock, discovery, clean audio over a long run, lip-sync with the LED wall) before using it on a show.
+
+A player can send its audio mix (video soundtracks) straight to Q-SYS as an AES67 stream: 48 kHz, L24 (or L16), 1 or 2 channels, 1 ms packets, multicast, locked to the Core's PTP clock. No Dante or USB audio interface is needed. If you'd rather not use it, a Dante AVIO USB adapter used as an ALSA device (*Audio → Sink: alsa*) also works.
+
+**On the player** (Settings tab):
+
+1. Turn on **Audio**, then **AES67 audio output**. Set **PTP domain** to the Core's domain (Q-SYS default: 0).
+2. Leave **Multicast address** blank for `239.69.<c>.<d>` (from the unit's `a.b.c.d`), or set an address from your multicast plan. Each player needs its own address.
+3. Save. The card shows *waiting for PTP sync*, then *on* with the PTP **grandmaster** ID. Until PTP has locked the player runs without AES67; when it locks, the pipeline restarts once (a short blank on the screen).
+4. The stream is announced by **SAP** every 30 s. The SDP is also at `http://<player>:8080/api/aes67.sdp`.
+
+`sudo deploy/install.sh` gives GStreamer's `gst-ptp-helper` the `cap_net_bind_service,cap_net_admin` capabilities it needs to use PTP ports 319/320. An OS update to GStreamer can reset this, so re-run `install.sh` afterwards (if the card says *PTP init failed*, this is why).
+
+**In Q-SYS Designer:**
+
+1. Core properties → Network → **AES67**: enable AES67 on the LAN the players are on, and set the **PTP domain** to match. Make sure the Core (or your designated grandmaster) is the PTP leader; the player is PTPv2 follower only.
+2. Add an **AES67 Receiver** to the design. With SAP discovery on, pick the stream (named *"<screen name> audio"* by default). Otherwise paste the SDP from `/api/aes67.sdp` or enter the multicast address, port 5004, 48 kHz, L24 and channel count by hand.
+3. Set the receiver latency to at least 2 ms (more on a busy network). The player stamps each packet with the PTP time it is sent, so the receiver latency only has to cover the network.
+
+**Network:**
+
+- Turn on **IGMP snooping** (with a querier) on the audio VLAN, so multicast only reaches the ports that join it.
+- Use **QoS**: DSCP **46 (EF)** for PTP and **34 (AF41)** for media, with strict-priority queueing for PTP. The player marks media with *Media DSCP* (default 34). GStreamer's PTP helper may not mark its PTP packets, so classify PTP (UDP 319/320) by port on the switch if your network only trusts markings.
+- Keep PTP and media on the same interface. On a unit with more than one NIC, set **Interface** (e.g. `eth0`).
+
+**Timing:** the player runs its whole pipeline on the PTP clock. The audio leaves at the same moment the frame goes to HDMI (after the *Latency budget*, plus about 20 ms and 2 frames), so it stays in step with the LED wall. Add delay in Q-SYS only if the LED processor delays the picture.
 
 ---
 
@@ -254,8 +285,10 @@ Back up this directory to back up a unit.
 - Tests:
   - `tests/smoke_test.py` covers the API, cue and scenario-lock logic, the TCP/UDP protocol, master fleet sync and the GUI pages, using the mock engine.
   - `tests/test_transcode.py` covers the convert/don't-convert decisions and the ffmpeg command.
+  - `tests/test_aes67.py` covers the AES67 SDP and SAP packets and the AES67 settings validation.
   - `tests/qsys_plugin_test.py` runs the Q-SYS plugin in a simulated Q-SYS runtime (needs `pip install lupa`).
   - The plugin has not yet been loaded in Q-SYS Designer, and conversion has not yet been run with a real ffmpeg on a Pi.
 - **The GStreamer engine (`cueplayer/engine.py`) has not yet been run on target hardware.** Before deployment, bench-test it on the actual Pi or VM with real media: cut/fade between video and image, looping, HDMI placement on the LED processor, NDI in Studio Monitor, and long soak runs.
+- **AES67 output has not yet been tested with real AES67 hardware or a Q-SYS Core.** Only the SDP/SAP generation and settings validation are tested (`tests/test_aes67.py`). Bench-test PTP lock, Q-SYS discovery, audio quality and lip-sync before relying on it. It supports 1–2 channels and assumes the PTP helper has the capabilities set by `install.sh`.
 - NDI uses the NDI SDK runtime, which has its own licence terms.
 - Port changes take effect after `sudo systemctl restart cueplayer`.

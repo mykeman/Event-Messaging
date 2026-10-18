@@ -112,6 +112,22 @@ def main():
         st = c.get("/api/status").json()
         check(st["mode"] == "default" and st["media"]["id"] == img["id"], f"default plays {st['mode']}")
 
+        # --- AES67 settings + SDP (mock engine: nothing is streamed) ---
+        check(c.get("/api/aes67.sdp").status_code == 404, "aes67 sdp 404 when off")
+        r = c.patch("/api/settings", json={"aes67": {"enabled": True, "port": 5005}})
+        check(r.status_code == 400 and "port" in r.json()["detail"], f"bad aes67 settings rejected ({r.status_code})")
+        r = c.patch("/api/settings", json={"aes67": {"enabled": True, "multicast": "239.69.9.9"}})
+        check(r.status_code == 200 and r.json()["aes67"]["enabled"], "aes67 enabled")
+        time.sleep(0.3)
+        r = c.get("/api/aes67.sdp")
+        check(r.status_code == 200 and r.headers["content-type"].startswith("application/sdp")
+              and "a=rtpmap:96 L24/48000/2" in r.text and "c=IN IP4 239.69.9.9/32" in r.text, f"aes67 sdp served ({r.status_code})")
+        check(c.get("/api/status").json()["engine"]["aes67"]["synced"], "aes67 status in engine status")
+        c.patch("/api/settings", json={"aes67": {"enabled": False}})
+        time.sleep(0.3)
+        st = c.get("/api/status").json()
+        check(st["mode"] == "default", f"still playing default after aes67 toggles ({st['mode']})")
+
         # --- play by name (GET, Q-SYS style) ---
         st = c.get("/api/play/gala loop", params={"duration": 1}).json()
         check(st["mode"] == "adhoc" and st["media"]["name"] == "Gala Loop", "play by name via GET")

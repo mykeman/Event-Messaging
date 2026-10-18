@@ -23,6 +23,12 @@ const SETTINGS_FORM = [
   { section: "transition", title: "Transitions", fields: [["type", "Type", "select", ["fade", "cut"]], ["duration_ms", "Fade (ms)", "number"]] },
   { section: "audio", title: "Audio", note: "Video soundtracks to HDMI/ALSA and into NDI.",
     fields: [["enabled", "Enabled", "check"], ["sink", "Sink", "select", ["auto", "alsa", "pulse", "none"]], ["device", "ALSA device", "text"]] },
+  { section: "aes67", title: "AES67 audio output", note: "Sends the audio mix as an AES67 multicast stream, locked to PTP, for Q-SYS and other AES67 receivers. Needs Audio enabled. Blank multicast = 239.69.x.y from this unit's address. Not yet bench-tested with a Q-SYS Core.",
+    fields: [["enabled", "Enabled", "check"], ["sap", "Announce (SAP)", "check"], ["multicast", "Multicast address", "text"], ["port", "Port", "number"],
+      ["channels", "Channels", "select", [2, 1]], ["bit_depth", "Bit depth", "select", [24, 16]],
+      ["ptime_ms", "Packet time (ms)", "select", [1, 0.125, 0.25, 4]], ["ptp_domain", "PTP domain", "number"],
+      ["ttl", "TTL", "number"], ["dscp", "Media DSCP", "number"], ["interface", "Interface (blank = default)", "text"],
+      ["session_name", "Session name", "text", null, "wide"]] },
   { section: "preview", title: "Web preview", fields: [["enabled", "Enabled", "check"], ["fps", "FPS", "number"], ["width", "Width", "number"]] },
   { section: "control", title: "Control", note: "Port changes take effect after a service restart.",
     fields: [["http_port", "HTTP port", "number"], ["tcp_port", "TCP port", "number"], ["udp_port", "UDP port", "number"],
@@ -48,6 +54,7 @@ function renderStatus() {
   const dropped = eng.frames_dropped || 0;
   $("#st-frames").textContent = eng.frames_rendered || dropped ? `${dropped} dropped` : "—";
   $("#st-frames").style.color = dropped ? "var(--warn)" : "";
+  if ($("#aes67-status")) $("#aes67-status").textContent = aes67Status();
   $("#canvas-info").textContent = (eng.canvas || "") + (eng.backend ? " · " + eng.backend : "");
   const errs = (eng.errors || []).slice(-3).reverse();
   $("#st-errors").replaceChildren(...errs.map(e => el("div", {}, new Date(e.t * 1000).toLocaleTimeString() + " " + e.msg)));
@@ -344,12 +351,22 @@ function renderSettingsForms() {
       el("button", { class: "small", onclick: () => {
         $(`[data-s="output"][data-k="canvas_width"]`).value = w; $(`[data-s="output"][data-k="canvas_height"]`).value = h; updateDiagram();
       } }, l))) : null;
-    const status = sec.section === "ndi" ? el("div", { class: "small muted", style: { marginTop: "8px" } }, "Status: " + ((S.status && S.status.engine.ndi) || "—")) : null;
+    const status = sec.section === "ndi" ? el("div", { class: "small muted", style: { marginTop: "8px" } }, "Status: " + ((S.status && S.status.engine.ndi) || "—"))
+      : sec.section === "aes67" ? el("div", { id: "aes67-status", class: "small muted", style: { marginTop: "8px" } }, aes67Status()) : null;
     return el("div", { class: "card" }, el("h2", {}, sec.title),
       sec.note ? el("p", { class: "small muted", style: { marginTop: 0 } }, sec.note) : null, presets, grid, status);
   }));
   $$("#settings-forms input, #settings-forms select").forEach(i => i.addEventListener("input", updateDiagram));
   updateDiagram();
+}
+
+function aes67Status() {
+  const a = (S.status && S.status.engine && S.status.engine.aes67) || {};
+  if (!a.state || a.state === "disabled") return "Status: disabled";
+  const parts = ["Status: " + a.state, "PTP " + (a.synced ? "locked" : "not locked") + " (domain " + a.domain + ")"];
+  if (a.grandmaster) parts.push("grandmaster " + a.grandmaster);
+  if (a.latency_ms) parts.push("send latency " + a.latency_ms + " ms");
+  return parts.join(" · ") + (a.synced ? " · SDP: /api/aes67.sdp" : "");
 }
 
 function formValue(s, k) {
@@ -377,7 +394,7 @@ async function saveSettings() {
     const { s, k, t } = e.dataset;
     let v = inputVal(e);
     if (t === "list") v = String(v).split(",").map(x => x.trim()).filter(Boolean);
-    if (t === "select" && /^\d+$/.test(v)) v = Number(v);
+    if (t === "select" && /^\d+(\.\d+)?$/.test(v)) v = Number(v);
     (patch[s] = patch[s] || {})[k] = v;
   });
   const oldToken = S.settings.control.api_token;

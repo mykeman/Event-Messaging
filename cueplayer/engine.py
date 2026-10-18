@@ -8,6 +8,14 @@ A single always-running GStreamer pipeline renders a fixed-size *canvas*:
                                                         ├─ preview (jpegenc → appsink, for the web GUI)
                                                         └─ fakesink (clock)
 
+    audiotestsrc(silence) ─┐
+    clip audio ────────────┴─ audiomixer ─ tee ─┬─ local audio sink
+                                                ├─ NDI (ndisinkcombiner)
+                                                └─ AES67 (rtpL24pay → udpsink multicast)
+
+With AES67 on, the pipeline runs on a PTP clock (GstNet) so RTP timestamps follow the
+PTP media clock (a=mediaclk:direct=0).
+
 Each clip is a bin added to the running pipeline. Its pad offset is set when its
 first frame arrives so it starts "now"; the previous clip keeps repeating its last
 frame until then, giving clean cuts and crossfades without black gaps.
@@ -25,6 +33,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from . import aes67
+from .common import hostname
 from .hwinfo import HW_DECODERS
 
 log = logging.getLogger("cueplayer.engine")
@@ -62,6 +72,7 @@ class BaseEngine:
         self._ids = itertools.count(1)
         self._preview: Optional[bytes] = None
         self.status: Dict[str, Any] = {"backend": "none", "running": False, "errors": []}
+        self._aes67_cfg: Optional[Dict[str, Any]] = None  # resolved config while streaming
 
     def start(self, settings: Dict[str, Any]) -> None: ...
     def rebuild(self, settings: Dict[str, Any]) -> None: ...
@@ -75,6 +86,17 @@ class BaseEngine:
 
     def preview_jpeg(self) -> Optional[bytes]:
         return self._preview
+
+    def aes67_sdp(self) -> Optional[str]:
+        """SDP of the AES67 stream, or None while it isn't running / PTP isn't synced."""
+        st = self.status.get("aes67") or {}
+        if self._aes67_cfg is None or not st.get("synced"):
+            return None
+        return aes67.build_sdp(self._aes67_cfg, st.get("grandmaster"), st.get("sdp_version", 0))
+
+    @staticmethod
+    def _screen_name(settings: Dict[str, Any]) -> str:
+        return (settings.get("fleet") or {}).get("screen_name") or hostname()
 
     def _emit(self, **event: Any) -> None:
         try:
@@ -96,6 +118,16 @@ class MockEngine(BaseEngine):
         out = settings["output"]
         self.status.update(running=True, display="mock", ndi="mock",
                            canvas=f"{out['canvas_width']}x{out['canvas_height']}@{out['framerate']}")
+        cfg = settings.get("aes67") or {}
+        st = aes67.status_template(cfg)
+        self._aes67_cfg = None
+        if cfg.get("enabled"):
+            # Nothing is streamed; this lets the SDP endpoint and GUI be exercised.
+            self._aes67_cfg = aes67.resolve(cfg, self._screen_name(settings))
+            st.update(state="mock (not streaming)", synced=True,
+                      grandmaster="00-00-00-FF-FE-00-00-00",
+                      multicast=self._aes67_cfg["multicast"])
+        self.status["aes67"] = st
         self._emit(type="engine_started")
 
     def rebuild(self, settings):
@@ -132,6 +164,14 @@ try:
     HAVE_GST = True
 except (ImportError, ValueError):  # pragma: no cover - depends on host
     HAVE_GST = False
+
+try:
+    gi.require_version("GstNet", "1.0")
+    from gi.repository import GstNet  # type: ignore
+
+    HAVE_GSTNET = True
+except (NameError, ImportError, ValueError):  # pragma: no cover - depends on host
+    HAVE_GSTNET = False
 
 
 class _Clip:
@@ -173,6 +213,11 @@ class GstEngine(BaseEngine):
         self._disabled_outputs: set = set()   # outputs switched off after repeated failures
         self._orig_ranks: Dict[str, int] = {}
         self._fail_counts: Dict[str, int] = {}
+        self._ptp_init: Optional[bool] = None   # gst_ptp_init() result (it can only run once)
+        self._ptp_clocks: Dict[int, Any] = {}   # domain -> GstPtpClock
+        self._ptp_timer = None
+        self._ptp_waiting = False               # pipeline built without AES67 until PTP syncs
+        self._sap: Optional[aes67.SapAnnouncer] = None
 
     # ---- thread marshalling ------------------------------------------------
     def _idle(self, fn, *args):
@@ -250,6 +295,13 @@ class GstEngine(BaseEngine):
                 raise RuntimeError(f"failed to link {a.get_name()} -> {b.get_name()}")
 
     def _teardown(self) -> None:
+        if self._ptp_timer:
+            GLib.source_remove(self._ptp_timer)
+            self._ptp_timer = None
+        if self._sap is not None:
+            self._sap.stop()
+            self._sap = None
+        self._aes67_cfg = None
         if self.pipeline is not None:
             self.pipeline.set_state(Gst.State.NULL)
             bus = self.pipeline.get_bus()
@@ -325,10 +377,11 @@ class GstEngine(BaseEngine):
                 self._error(f"display: {e}")
 
         # --- audio core (optional) ---
+        aes = settings.get("aes67") or {}
         atee = None
         if audio.get("enabled"):
             try:
-                atee = self._build_audio(audio)
+                atee = self._build_audio(audio, low_latency=bool(aes.get("enabled")))
                 self.status["audio"] = "on"
             except Exception as e:
                 self.status["audio"] = f"error: {e}"
@@ -366,6 +419,11 @@ class GstEngine(BaseEngine):
                          self._caps(f"video/x-raw,width={pw},height={ph}"),
                          self._make("jpegenc", quality=70),
                          sink)
+
+        # --- AES67 (optional; sets the pipeline clock, so it goes last) ---
+        self.status["aes67"] = aes67.status_template(aes)
+        if aes.get("enabled"):
+            self._setup_aes67(atee, aes, fps)
 
         ret = self.pipeline.set_state(Gst.State.PLAYING)
         if ret == Gst.StateChangeReturn.FAILURE:
@@ -435,9 +493,11 @@ class GstEngine(BaseEngine):
         self._branch(tee, *els)
         self.status["display"] = f"{kind} {dw}x{dh} @ {x},{y} ({ow}x{oh})"
 
-    def _build_audio(self, audio) -> Any:
+    def _build_audio(self, audio, low_latency: bool = False) -> Any:
         rate_caps = "audio/x-raw,rate=48000,channels=2"
         src = self._make("audiotestsrc", is_live=True, wave=4)  # silence
+        if low_latency:  # default 1024-sample buffers add ~21 ms of latency
+            src.set_property("samplesperbuffer", 240)
         self.amix = self._make("audiomixer", "amix")
         atee = self._make("tee", "atee", allow_not_linked=True)
         cf = self._caps(rate_caps + ",format=F32LE")
@@ -479,6 +539,136 @@ class GstEngine(BaseEngine):
             aq[-1].get_static_pad("src").link((comb.request_pad_simple("audio") if hasattr(comb, "request_pad_simple") else comb.get_request_pad("audio")))
         else:
             self._branch(tee, *vq, sink)
+
+    # ---- AES67 ----------------------------------------------------------------
+    def _ptp_clock(self, domain: int, iface: str) -> Any:
+        """GstPtpClock for `domain`, initialising PTP on first use. Raises on failure."""
+        if not HAVE_GSTNET:
+            raise RuntimeError("GstNet (gir1.2-gstreamer-1.0) not available")
+        if self._ptp_init is None:
+            if hasattr(GstNet, "ptp_is_supported") and not GstNet.ptp_is_supported():
+                self._ptp_init = False
+            else:
+                none = getattr(GstNet, "PTP_CLOCK_ID_NONE", 2 ** 64 - 1)
+                # Needs gst-ptp-helper with CAP_NET_BIND_SERVICE (ports 319/320), see install.sh
+                self._ptp_init = bool(GstNet.ptp_init(none, [iface] if iface else None))
+        if not self._ptp_init:
+            raise RuntimeError("PTP init failed - gst-ptp-helper needs cap_net_bind_service,"
+                               "cap_net_admin (sudo deploy/install.sh sets it); restart after fixing")
+        clock = self._ptp_clocks.get(domain)
+        if clock is None:
+            clock = GstNet.PtpClock.new(f"ptp-clock-{domain}", domain)
+            if clock is None:
+                raise RuntimeError(f"could not create a PTP clock for domain {domain}")
+            self._ptp_clocks[domain] = clock
+        return clock
+
+    def _ptp_ids(self, clock) -> Tuple[Optional[str], Optional[str]]:
+        try:
+            return (aes67.clock_id_str(clock.get_property("grandmaster-clock-id")),
+                    aes67.clock_id_str(clock.get_property("master-clock-id")))
+        except Exception:
+            return None, None
+
+    def _setup_aes67(self, atee, cfg: Dict[str, Any], fps: int) -> None:
+        st = self.status["aes67"]
+        if atee is None:
+            st["state"] = "needs Audio enabled"
+            return
+        if "aes67" in self._disabled_outputs:
+            st["state"] = "disabled after repeated errors (save settings to retry)"
+            return
+        domain = int(cfg.get("ptp_domain", 0))
+        try:
+            clock = self._ptp_clock(domain, cfg.get("interface", ""))
+        except Exception as e:
+            st["state"] = f"error: {e}"
+            self._error(f"aes67: {e}")
+            return
+        # Poll sync state / grandmaster for status, and to finish a pending start.
+        self._ptp_timer = GLib.timeout_add_seconds(1, self._ptp_poll, clock)
+        if not clock.is_synced():
+            # The pipeline clock can't be swapped while running, so play without AES67 now
+            # and rebuild once PTP has locked (one short blank on the screen).
+            self._ptp_waiting = True
+            st["state"] = f"waiting for PTP sync (domain {domain})"
+            return
+        self._ptp_waiting = False
+        try:
+            self._build_aes67(atee, cfg, clock, fps)
+        except Exception as e:
+            st["state"] = f"error: {e}"
+            self._error(f"aes67: {e}")
+
+    def _build_aes67(self, atee, cfg: Dict[str, Any], clock, fps: int) -> None:
+        r = aes67.resolve(cfg, self._screen_name(self.settings))
+        ch, depth, ptime = int(r["channels"]), int(r["bit_depth"]), float(r["ptime_ms"])
+        ptime_ns = int(ptime * Gst.MSECOND)
+        grid = 125 * Gst.USECOND  # 6 samples at 48 kHz: keeps the RTP maths exact
+
+        # Fixed pipeline latency, so the time a packet leaves is known in advance. It covers
+        # the display's processing deadline plus a couple of frames of compositing.
+        lat = (int(self.settings["output"].get("latency_ms", 100)) + 20) * Gst.MSECOND \
+            + 2 * Gst.SECOND // max(1, fps)
+        lat = -(-lat // grid) * grid
+        # Run the whole pipeline on PTP time. A buffer with running time t is sent at PTP time
+        # base + t + latency; that is also its RTP timestamp, so rtptime = PTP time x 48 kHz
+        # (mod 2^32) at the moment it leaves - what direct=0 receivers expect.
+        base = clock.get_time()
+        base -= base % grid
+        ts_offset = ((base + lat) * aes67.SAMPLE_RATE // Gst.SECOND) % (1 << 32)
+
+        fmt, pay_name = ("S24BE", "rtpL24pay") if depth == 24 else ("S16BE", "rtpL16pay")
+        pay = self._make(pay_name, pt=aes67.PAYLOAD_TYPE,
+                         mtu=aes67.RTP_HEADER + aes67.payload_bytes(ch, depth, ptime),
+                         min_ptime=ptime_ns, max_ptime=ptime_ns, ptime_multiple=ptime_ns,
+                         timestamp_offset=ts_offset)
+        sink = self._make("udpsink", "aes67_sink", host=r["multicast"], port=int(r["port"]),
+                          auto_multicast=True, ttl_mc=int(r["ttl"]), qos_dscp=int(r["dscp"]),
+                          sync=True)
+        sink.set_property("async", False)
+        if r.get("interface"):
+            sink.set_property("multicast-iface", r["interface"])
+        self._branch(atee, self._make("queue", leaky=2), self._make("audioconvert"),
+                     self._make("audioresample"),
+                     self._caps(f"audio/x-raw,format={fmt},rate={aes67.SAMPLE_RATE},"
+                                f"channels={ch},layout=interleaved"),
+                     pay, sink)
+        self.pipeline.use_clock(clock)
+        self.pipeline.set_start_time(Gst.CLOCK_TIME_NONE)
+        self.pipeline.set_base_time(base)
+        self.pipeline.set_latency(lat)
+
+        gm, master = self._ptp_ids(clock)
+        self._aes67_cfg = r
+        self.status["aes67"].update(
+            state=f"on ({r['multicast']}:{r['port']} L{depth}/{ch}ch/{ptime:g}ms)", synced=True,
+            grandmaster=gm, master=master, multicast=r["multicast"], latency_ms=lat / Gst.MSECOND,
+            sdp_version=int(time.time()))
+        if r.get("sap", True):
+            self._sap = aes67.SapAnnouncer(self.aes67_sdp, r["source_ip"], int(r["ttl"])).start()
+        log.info("AES67 stream %s:%s PTP domain %s grandmaster %s", r["multicast"], r["port"],
+                 r["ptp_domain"], gm)
+
+    def _ptp_poll(self, clock) -> bool:
+        st = self.status.get("aes67") or {}
+        synced = bool(clock.is_synced())
+        gm, master = self._ptp_ids(clock)
+        if self._ptp_waiting:
+            if synced:
+                log.info("PTP synced (grandmaster %s) - starting AES67 output", gm)
+                self._ptp_timer = None
+                self._safe_build(self.settings)
+                return False
+            return True
+        if gm != st.get("grandmaster") and gm:
+            st["sdp_version"] = int(time.time())  # SDP changes with the grandmaster
+        st.update(synced=synced, grandmaster=gm or st.get("grandmaster"), master=master)
+        if self._aes67_cfg is not None:
+            r = self._aes67_cfg
+            st["state"] = (f"on ({r['multicast']}:{r['port']})" if synced
+                           else "on, PTP sync lost (free-running)")
+        return True
 
     # ---- preview -------------------------------------------------------------
     def _on_preview(self, sink) -> Any:
@@ -727,7 +917,8 @@ class GstEngine(BaseEngine):
             self.status["running"] = False
             # A sink that keeps failing (unplugged HDMI, NDI runtime problem) is switched
             # off so the other outputs keep running instead of restart-looping.
-            out = {"display_sink": "display", "ndi_sink": "ndi"}.get(msg.src.get_name())
+            out = {"display_sink": "display", "ndi_sink": "ndi",
+                   "aes67_sink": "aes67"}.get(msg.src.get_name())
             if out:
                 self._fail_counts[out] = self._fail_counts.get(out, 0) + 1
                 if self._fail_counts[out] >= 3:
