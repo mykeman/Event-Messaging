@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CuePlayer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">CuePlayer <small id="unit-name"></small></div>
+  <nav>
+    <a href="#live">Live</a>
+    <a href="#library">Media</a>
+    <a href="#cues">Cues</a>
+    <a href="#settings">Settings</a>
+    <a href="#api">API</a>
+  </nav>
+  <div class="spacer"></div>
+  <div class="conn"><span class="dot" id="conn-dot"></span><span id="conn-text">connecting</span></div>
+</header>
+
+<main>
+  <!-- LIVE -->
+  <section class="tab" id="tab-live">
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="row between"><h2>Output</h2><span class="small muted" id="canvas-info"></span></div>
+        <div class="preview-wrap" id="preview-wrap">
+          <img id="preview" alt="">
+          <div class="placeholder" id="preview-ph">No preview</div>
+        </div>
+        <div class="now">
+          <div class="row">
+            <span id="now-badge"></span>
+            <span class="muted small" id="now-cue"></span>
+            <span class="spacer" style="flex:1"></span>
+            <span class="mono small" id="now-time"></span>
+          </div>
+          <div class="title" id="now-title">—</div>
+          <div class="progress"><div id="now-progress"></div></div>
+        </div>
+        <div class="transport">
+          <button class="big" id="btn-default" title="Return to default content">Default</button>
+          <button class="big" id="btn-next" title="Skip to next item">Next</button>
+          <button class="big danger" id="btn-black" title="Fade to black">Black</button>
+        </div>
+        <div class="row small muted" style="margin-top:12px; gap:16px">
+          <span>NDI: <span id="st-ndi">—</span></span>
+          <span>Display: <span id="st-display">—</span></span>
+        </div>
+        <div class="err-list" id="st-errors"></div>
+      </div>
+      <div class="card">
+        <div class="row between"><h2>Cues</h2><a href="#cues" class="small">Edit cues</a></div>
+        <div class="cue-grid" id="live-cues"></div>
+        <h3>Quick play</h3>
+        <div class="row" style="margin-bottom:8px">
+          <input id="quick-filter" placeholder="Filter media…" style="flex:1">
+          <label class="check small"><input type="checkbox" id="quick-loop"> Loop</label>
+          <label class="check small"><input type="checkbox" id="quick-hold"> Hold at end</label>
+        </div>
+        <div class="media-grid" id="quick-media" style="grid-template-columns:repeat(auto-fill,minmax(140px,1fr))"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- MEDIA -->
+  <section class="tab" id="tab-library">
+    <div class="card" style="margin-bottom:16px">
+      <h2>Upload</h2>
+      <div class="row" style="margin-bottom:10px">
+        <label class="field"><span>Category</span>
+          <select id="up-category">
+            <option value="event">Event-specific</option>
+            <option value="library">Standard library</option>
+          </select></label>
+        <label class="field"><span>Auto-delete after (optional)</span><input type="date" id="up-expires"></label>
+        <label class="field"><span>Scaling</span>
+          <select id="up-scale"><option value="">Use default</option><option>fit</option><option>fill</option><option>stretch</option><option>none</option></select></label>
+      </div>
+      <div class="drop" id="drop">Drop video or image files here, or click to choose<br>
+        <span class="small">MP4/MOV/MKV/WebM, PNG/JPG/GIF/WebP</span></div>
+      <div class="uploads" id="uploads"></div>
+      <div class="small muted" id="disk" style="margin-top:8px"></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="row between"><h2>Event-specific</h2><input id="lib-filter" placeholder="Filter…"></div>
+      <div class="media-grid" id="lib-event"></div>
+    </div>
+    <div class="card">
+      <h2>Standard library</h2>
+      <div class="media-grid" id="lib-library"></div>
+    </div>
+  </section>
+
+  <!-- CUES -->
+  <section class="tab" id="tab-cues">
+    <div class="grid">
+      <div class="card">
+        <div class="row between">
+          <h2>Cue list</h2>
+          <button class="primary" id="cue-add">Add cue</button>
+        </div>
+        <p class="small muted">Q-SYS (or anything else) triggers cues by number or label, e.g. <code>CUE 3</code> over TCP or <code>GET /api/cue/3</code>.
+          A cue with several media items plays them as a sequence.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th style="width:70px">#</th><th style="min-width:140px">Label</th><th style="min-width:240px">Media</th><th style="width:60px">Loop</th>
+              <th style="width:90px">Duration</th><th style="width:130px">Then</th><th style="width:60px">Colour</th><th></th></tr></thead>
+            <tbody id="cue-rows"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card" style="max-width:720px">
+        <h2>Default content</h2>
+        <p class="small muted">Plays whenever nothing has been triggered, and after a cue finishes (unless the cue says otherwise).</p>
+        <div class="row" style="margin-bottom:10px">
+          <label class="field"><span>Mode</span>
+            <select id="def-mode"><option value="playlist">Playlist</option><option value="black">Black</option></select></label>
+          <label class="field"><span>Image duration (s)</span><input type="number" id="def-imgdur" min="1" style="width:90px"></label>
+          <label class="check" style="margin-top:16px"><input type="checkbox" id="def-shuffle"> Shuffle</label>
+        </div>
+        <div class="playlist" id="def-list"></div>
+        <div class="row" style="margin-top:10px">
+          <select id="def-add" style="flex:1"></select>
+          <button id="def-add-btn">Add</button>
+        </div>
+        <div class="row" style="margin-top:14px"><button class="primary" id="def-save">Save default content</button></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section class="tab" id="tab-settings">
+    <div class="grid cols-2">
+      <div class="grid" id="settings-forms"></div>
+      <div class="grid" style="align-content:start">
+        <div class="card">
+          <h2>Output layout</h2>
+          <p class="small muted">Blue = canvas (what NDI carries). Dashed = the physical display raster. Use the offset to
+            map the canvas onto the region your LED processor captures.</p>
+          <div class="diagram" id="diagram"><div class="disp"></div><div class="canvas" id="diagram-canvas"></div></div>
+          <div class="small muted" id="diagram-text" style="margin-top:6px"></div>
+        </div>
+        <div class="card">
+          <h2>System</h2>
+          <dl class="kv" id="sysinfo"></dl>
+        </div>
+        <div class="card">
+          <div class="row"><button class="primary big" id="settings-save">Save settings</button>
+            <span class="small muted">Output changes restart the video pipeline (≈1 s blank).</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- API -->
+  <section class="tab" id="tab-api">
+    <div class="grid cols-even">
+      <div class="card">
+        <h2>HTTP (GET or POST)</h2>
+        <pre class="api" id="api-http"></pre>
+        <p class="small muted">Options: <code>loop=1</code> <code>duration=10</code> <code>after=default|hold|black|cue:5</code> <code>transition=0</code>.
+          With a token set, add <code>Authorization: Bearer &lt;token&gt;</code> or <code>?token=</code>.
+          Full schema at <a href="/docs">/docs</a>.</p>
+      </div>
+      <div class="card">
+        <h2>TCP / UDP (line protocol)</h2>
+        <pre class="api" id="api-tcp"></pre>
+        <p class="small muted">TCP clients receive <code>EVENT …</code> lines whenever playback changes — use them for button feedback in Q-SYS.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="/static/common.js"></script>
+<script src="/static/player.js"></script>
+</body>
+</html>

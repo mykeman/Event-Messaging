@@ -1,0 +1,25 @@
+[project]
+name = "cueplayer"
+version = "1.0.0"
+description = "Open digital signage platform for events: cue-triggered video/image playback for LED walls and displays, with NDI output, web GUI, multi-screen master and AV control system integration"
+requires-python = ">=3.9"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "websockets>=12",
+  "python-multipart>=0.0.9",
+  "httpx>=0.27",
+]
+
+[project.scripts]
+cueplayer = "cueplayer.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["cueplayer"]
+
+[tool.setuptools.package-data]
+cueplayer = ["web/*"]

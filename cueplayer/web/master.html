@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CuePlayer Master</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">CuePlayer <small>Master</small></div>
+  <nav>
+    <a href="#screens">Screens</a>
+    <a href="#gcues">Global cues</a>
+    <a href="#media">Media</a>
+    <a href="#cues">Shared cue list</a>
+    <a href="#settings">Settings &amp; API</a>
+  </nav>
+  <div class="spacer"></div>
+  <div class="conn"><span class="dot" id="conn-dot"></span><span id="conn-text">connecting</span></div>
+</header>
+
+<main>
+  <!-- SCREENS -->
+  <section class="tab" id="tab-screens">
+    <div class="card" style="margin-bottom:16px">
+      <div class="row" style="gap:12px; align-items:flex-end">
+        <label class="field"><span>Target</span><select id="target" style="min-width:200px"></select></label>
+        <label class="field"><span>Cue</span><input id="t-cue" placeholder="e.g. 3" style="width:90px"></label>
+        <button class="primary" id="t-cue-go">Fire cue</button>
+        <label class="field"><span>Media</span><select id="t-media" style="min-width:200px"></select></label>
+        <label class="check small" style="margin-bottom:8px"><input type="checkbox" id="t-loop"> Loop</label>
+        <label class="check small" style="margin-bottom:8px"><input type="checkbox" id="t-hold"> Hold</label>
+        <button class="primary" id="t-play-go">Play</button>
+        <span style="flex:1"></span>
+        <button id="t-default">Default</button>
+        <button class="danger" id="t-black">Black</button>
+      </div>
+      <div class="small muted" id="t-result" style="margin-top:8px"></div>
+    </div>
+    <div class="row between" style="margin-bottom:10px">
+      <div class="small muted" id="screen-summary"></div>
+      <div class="row"><button id="sync-all">Sync media to all</button><button class="primary" id="screen-add">Add screen</button></div>
+    </div>
+    <div class="screen-grid" id="screens"></div>
+  </section>
+
+  <!-- GLOBAL CUES -->
+  <section class="tab" id="tab-gcues">
+    <div class="card" style="margin-bottom:16px">
+      <h2>Fire</h2>
+      <p class="small muted" style="margin-top:0">A global cue performs one or more actions across screens at once — e.g. an emergency message everywhere,
+        or different sponsor content per zone. Trigger from Q-SYS with <code>GCUE 10</code> (TCP) or <code>GET /api/gcue/10</code>.</p>
+      <div class="cue-grid" id="gcue-buttons"></div>
+    </div>
+    <div class="card">
+      <div class="row between"><h2>Edit global cues</h2><button class="primary" id="gcue-add">Add global cue</button></div>
+      <div id="gcue-editor" class="grid"></div>
+    </div>
+  </section>
+
+  <!-- MEDIA -->
+  <section class="tab" id="tab-media">
+    <div class="card" style="margin-bottom:16px">
+      <h2>Upload to fleet</h2>
+      <div class="row" style="margin-bottom:10px; align-items:flex-end">
+        <label class="field"><span>Category</span>
+          <select id="up-category"><option value="library">Standard library</option><option value="event">Event-specific</option></select></label>
+        <label class="field"><span>Send to</span><input id="up-targets" value="all" list="target-list" style="min-width:220px"></label>
+        <label class="field"><span>Auto-delete after</span><input type="date" id="up-expires"></label>
+      </div>
+      <datalist id="target-list"></datalist>
+      <div class="drop" id="drop">Drop files here, or click to choose. Files are pushed to the targeted screens automatically.</div>
+      <div class="uploads" id="uploads"></div>
+      <div class="small muted" id="disk" style="margin-top:8px"></div>
+    </div>
+    <div class="card">
+      <div class="row between"><h2>Fleet library</h2><input id="lib-filter" placeholder="Filter…"></div>
+      <p class="small muted" style="margin-top:0">Targets: <code>all</code>, <code>group:&lt;name&gt;</code>, <code>screen:&lt;name&gt;</code> (comma separated).
+        Media uploaded directly on a screen stays local to that screen and is never removed by sync.</p>
+      <div class="media-grid" id="library"></div>
+    </div>
+  </section>
+
+  <!-- SHARED CUES -->
+  <section class="tab" id="tab-cues">
+    <div class="card">
+      <div class="row between"><h2>Shared player cue list</h2><button class="primary" id="cue-add">Add cue</button></div>
+      <p class="small muted" style="margin-top:0">Pushed to every screen with “Sync cue list” enabled, so cue numbers mean the same thing everywhere.
+        Uses media from the fleet library — make sure it targets those screens.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th style="width:70px">#</th><th style="min-width:140px">Label</th><th style="min-width:240px">Media</th><th>Loop</th><th>Duration</th><th>Then</th><th></th></tr></thead>
+        <tbody id="cue-rows"></tbody></table></div>
+    </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section class="tab" id="tab-settings">
+    <div class="grid cols-even">
+      <div class="card">
+        <h2>Master settings</h2>
+        <div class="form-grid">
+          <label class="field wide"><span>API token (blank = open)</span><input type="password" id="m-token" autocomplete="off"></label>
+          <label class="field"><span>TCP port</span><input type="number" id="m-tcp"></label>
+          <label class="field"><span>UDP port</span><input type="number" id="m-udp"></label>
+        </div>
+        <p class="small muted">Players register with this token (their <code>fleet.master_token</code>). Port changes need a service restart.</p>
+        <button class="primary" id="m-save">Save</button>
+      </div>
+      <div class="card">
+        <h2>HTTP (GET or POST)</h2>
+        <pre class="api" id="api-http"></pre>
+      </div>
+      <div class="card">
+        <h2>TCP / UDP</h2>
+        <pre class="api" id="api-tcp"></pre>
+        <p class="small muted">TCP clients get <code>EVENT screen=… mode=…</code> lines when any screen changes.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="/static/common.js"></script>
+<script src="/static/master.js"></script>
+</body>
+</html>
