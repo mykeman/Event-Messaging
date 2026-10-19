@@ -38,6 +38,10 @@ DEFAULTS: Dict[str, Any] = {
         "out_height": 0,
         # kmssink only: DRM connector id (0 = first connected)
         "connector_id": 0,
+        # kmssink only. auto: keep the mode set at boot (install.sh --take-hdmi) when it
+        # matches width x height, so its refresh rate is used; otherwise kmssink picks one
+        # (usually 60 Hz). Or "keep" / "force".
+        "modeset": "auto",
     },
     "ndi": {
         "enabled": True,

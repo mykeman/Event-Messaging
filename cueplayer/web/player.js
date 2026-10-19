@@ -9,12 +9,13 @@ const SETTINGS_FORM = [
       ["framerate", "Frame rate", "select", [24, 25, 30, 50, 60]], ["background", "Background", "color"],
       ["scale_mode", "Scale media", "select", ["fit", "fill", "stretch", "none"]],
       ["hw_decode", "Hardware decode", "check"], ["latency_ms", "Latency budget (ms)", "number"]] },
-  { section: "display", title: "Display output (HDMI)", note: "Display mode and where the canvas is placed. Out width/height 0 = canvas size (1:1).",
+  { section: "display", title: "Display output (HDMI)", note: "Display mode and where the canvas is placed. Out width/height 0 = canvas size (1:1). Display mode auto keeps the HDMI mode (and refresh rate) set by install.sh --take-hdmi; match it to the canvas frame rate for smooth motion.",
     fields: [["enabled", "Enabled", "check"], ["sink", "Video sink", "select", ["auto", "kms", "gl", "x", "wayland", "fb", "none"]],
       ["width", "Display width", "number"], ["height", "Display height", "number"],
       ["x", "Offset X", "number"], ["y", "Offset Y", "number"],
       ["out_width", "Out width", "number"], ["out_height", "Out height", "number"],
-      ["connector_id", "DRM connector (kms)", "number"]] },
+      ["connector_id", "DRM connector (kms)", "number"],
+      ["modeset", "Display mode (kms)", "select", ["auto", "keep", "force"]]] },
   { section: "ndi", title: "NDI output", fields: [["enabled", "Enabled", "check"], ["name", "Source name", "text", null, "wide"]] },
   { section: "transcode", title: "Media conversion", note: "Files this unit would struggle to play (codec, size, frame rate, 10-bit, interlaced) get an optimised H.264 copy in the background. The original plays until it's ready.",
     fields: [["mode", "Mode", "select", ["auto", "always", "off"]], ["keep_original", "Keep originals", "check"],
@@ -50,6 +51,8 @@ function renderStatus() {
   const eng = st.engine || {};
   $("#st-ndi").textContent = eng.ndi || "—";
   $("#st-display").textContent = eng.display || "—";
+  $("#st-display-warn").textContent = eng.display_warning ? "⚠ " + eng.display_warning : "";
+  $("#st-display-warn").classList.toggle("hidden", !eng.display_warning);
   $("#st-decoder").textContent = eng.video_decoder ? eng.video_decoder + (/^(avdec|vp8dec|vp9dec|dav1d|openh264)/.test(eng.video_decoder) ? " (software)" : " (hardware)") : "—";
   const dropped = eng.frames_dropped || 0;
   $("#st-frames").textContent = eng.frames_rendered || dropped ? `${dropped} dropped` : "—";

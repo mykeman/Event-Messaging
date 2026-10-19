@@ -28,6 +28,7 @@ from __future__ import annotations
 import itertools
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -52,6 +53,31 @@ def fit_rect(sw: int, sh: int, cw: int, ch: int, mode: str) -> Tuple[int, int, i
         s = min(cw / sw, ch / sh) if mode == "fit" else max(cw / sw, ch / sh)
         w, h = max(1, round(sw * s)), max(1, round(sh * s))
     return (cw - w) // 2, (ch - h) // 2, w, h
+
+
+def boot_video_modes(cmdline: Optional[str] = None) -> Dict[str, Tuple[int, int, float]]:
+    """Display modes forced on the kernel command line (video=HDMI-A-1:1920x1080@50D, as
+    set by install.sh --take-hdmi): {"HDMI-A-1": (1920, 1080, 50.0)}."""
+    if cmdline is None:
+        try:
+            cmdline = Path("/proc/cmdline").read_text()
+        except OSError:
+            return {}
+    out = {}
+    for tok in cmdline.split():
+        m = re.fullmatch(r"video=([A-Za-z0-9-]+):(\d+)x(\d+)M?R?(?:-\d+)?@(\d+(?:\.\d+)?)\S*", tok)
+        if m:
+            out[m.group(1)] = (int(m.group(2)), int(m.group(3)), float(m.group(4)))
+    return out
+
+
+def cadence_ok(fps: float, refresh: float) -> bool:
+    """True when every frame is shown for the same number of refreshes (e.g. 25 or 50 fps
+    on 50 Hz, 30 or 60 fps on 60 Hz). Otherwise motion judders even with no dropped frames."""
+    if fps <= 0 or refresh <= 0:
+        return True
+    ratio = refresh / fps
+    return round(ratio) >= 1 and abs(ratio - round(ratio)) < 0.01
 
 
 def parse_colour(hex_colour: str) -> int:
@@ -212,6 +238,7 @@ class GstEngine(BaseEngine):
         self._restart_timer = None
         self._disabled_outputs: set = set()   # outputs switched off after repeated failures
         self._orig_ranks: Dict[str, int] = {}
+        self._modeset_fallback = False  # keeping the boot mode failed: let kmssink set one
         self._fail_counts: Dict[str, int] = {}
         self._ptp_init: Optional[bool] = None   # gst_ptp_init() result (it can only run once)
         self._ptp_clocks: Dict[int, Any] = {}   # domain -> GstPtpClock
@@ -242,6 +269,7 @@ class GstEngine(BaseEngine):
 
     def rebuild(self, settings):
         self._disabled_outputs.clear()  # new settings: give every output another chance
+        self._modeset_fallback = False
         self._idle(self._safe_build, settings)
 
     def _safe_build(self, settings) -> None:
@@ -455,10 +483,33 @@ class GstEngine(BaseEngine):
                 kind = "auto-desktop"
             else:
                 kind = "kms"
+        fps = float(self.settings["output"]["framerate"])
+        mode_note = ""
+        self.status.pop("display_warning", None)
+        self.status.pop("display_refresh", None)
         if kind == "kms":
-            sink = self._make("kmssink", force_modesetting=True)
+            # kmssink's own modesetting picks the first mode with the right resolution,
+            # which is nearly always 60 Hz. When the boot command line already set the
+            # mode (install.sh --take-hdmi), keep it so its refresh rate is honoured.
+            boot = [m for m in boot_video_modes().values() if m[:2] == (dw, dh)]
+            modeset = disp.get("modeset", "auto")
+            keep = (modeset == "keep" or (modeset == "auto" and bool(boot))) and not self._modeset_fallback
+            sink = self._make("kmssink", force_modesetting=not keep)
             if int(disp.get("connector_id") or 0) > 0:
                 sink.set_property("connector-id", int(disp["connector_id"]))
+            if keep:
+                refresh = boot[0][2] if boot else 0.0
+                mode_note = f"@{refresh:g}Hz (boot mode)" if refresh else "(current mode)"
+            else:
+                refresh = 60.0
+                mode_note = "(mode picked by kmssink, usually 60 Hz)"
+            if refresh:
+                self.status["display_refresh"] = refresh
+            if not cadence_ok(fps, refresh):
+                self.status["display_warning"] = (
+                    f"A {fps:g} fps canvas on a {refresh:g} Hz output judders. Run "
+                    f"sudo ./deploy/install.sh --take-hdmi --hdmi-mode {dw}x{dh}@{fps:g} and reboot, "
+                    f"or set the canvas to {int(refresh) if fps * 2 > refresh else int(refresh / 2)} fps.")
         elif kind == "gl":
             sink = self._make("glimagesink")
         elif kind == "x":
@@ -491,7 +542,7 @@ class GstEngine(BaseEngine):
                     self._make("videoconvert")]
         els.append(sink)
         self._branch(tee, *els)
-        self.status["display"] = f"{kind} {dw}x{dh} @ {x},{y} ({ow}x{oh})"
+        self.status["display"] = f"{kind} {dw}x{dh}{' ' + mode_note if mode_note else ''} · canvas at {x},{y} ({ow}x{oh})"
 
     def _build_audio(self, audio, low_latency: bool = False) -> Any:
         rate_caps = "audio/x-raw,rate=48000,channels=2"
@@ -919,6 +970,11 @@ class GstEngine(BaseEngine):
             # off so the other outputs keep running instead of restart-looping.
             out = {"display_sink": "display", "ndi_sink": "ndi",
                    "aes67_sink": "aes67"}.get(msg.src.get_name())
+            if out == "display" and not self._modeset_fallback and \
+                    msg.src.find_property("force-modesetting") and \
+                    not msg.src.get_property("force-modesetting"):
+                log.warning("kmssink could not use the current display mode - letting it set one")
+                self._modeset_fallback = True
             if out:
                 self._fail_counts[out] = self._fail_counts.get(out, 0) + 1
                 if self._fail_counts[out] >= 3:
