@@ -321,7 +321,7 @@ function renderDefault() {
     const m = S.media.find(x => x.id === id);
     return el("div", { class: "item" },
       el("span", { class: "mono small muted" }, i + 1),
-      el("span", { class: "name" }, m ? m.name : "(missing " + id + ")"),
+      el("span", { class: "name", title: m ? m.name : "" }, m ? m.name : "(missing " + id + ")"),
       m ? el("span", { class: "badge" }, m.kind) : null,
       el("button", { class: "icon", disabled: i === 0, onclick: () => { S.defList.splice(i - 1, 0, S.defList.splice(i, 1)[0]); renderDefault(); } }, "↑"),
       el("button", { class: "icon", disabled: i === S.defList.length - 1, onclick: () => { S.defList.splice(i + 1, 0, S.defList.splice(i, 1)[0]); renderDefault(); } }, "↓"),

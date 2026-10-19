@@ -129,12 +129,17 @@ th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: upp
 td input, td select { width: 100%; }
 .table-wrap { overflow-x: auto; }
 .table-wrap table { min-width: 860px; }
+/* fixed columns so narrow screens scroll sideways instead of squashing the inputs */
+.table-wrap table.cue-table { table-layout: fixed; min-width: 1180px; }
+.cue-table td { overflow: hidden; }
 .cue-media { flex: 1; }
 
 .playlist { display: grid; gap: 6px; }
 .playlist .item { display: flex; gap: 8px; align-items: center; background: var(--panel-2); padding: 6px 8px;
   border-radius: 8px; border: 1px solid var(--line); }
-.playlist .item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.playlist .item { min-width: 0; }
+.playlist .item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.playlist .item > :not(.name) { flex-shrink: 0; }
 
 /* screens (master) */
 .screen-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }

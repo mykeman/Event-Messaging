@@ -114,9 +114,9 @@
         <p class="small muted">Q-SYS (or anything else) triggers cues by number or label, e.g. <code>CUE 3</code> over TCP or <code>GET /api/cue/3</code>.
           A cue with several media items plays them as a sequence.</p>
         <div class="table-wrap">
-          <table>
-            <thead><tr><th style="width:70px">#</th><th style="min-width:140px">Label</th><th style="min-width:240px">Media</th><th style="width:110px">Type</th><th style="width:50px" title="Locked: stays up until Normal, blocks other triggers">Lock</th><th style="width:60px">Loop</th>
-              <th style="width:90px">Duration</th><th style="width:130px">Then</th><th style="width:60px">Colour</th><th></th></tr></thead>
+          <table class="cue-table">
+            <thead><tr><th style="width:76px">#</th><th style="width:170px">Label</th><th>Media</th><th style="width:116px">Type</th><th style="width:52px" title="Locked: stays up until Normal, blocks other triggers">Lock</th><th style="width:52px">Loop</th>
+              <th style="width:96px">Duration</th><th style="width:132px">Then</th><th style="width:64px">Colour</th><th style="width:150px"></th></tr></thead>
             <tbody id="cue-rows"></tbody>
           </table>
         </div>
