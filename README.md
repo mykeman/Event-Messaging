@@ -22,7 +22,7 @@ Control ── TCP/HTTP ───▶ │ screens · groups · global cues · fle
      │                   └───────────────┬───────────────────────┬───────────────────────────────┘
      │                                   │ HTTP                  │ HTTP
      │ (or direct)       ┌───────────────▼───────┐       ┌───────▼───────────────┐
-     └──── TCP/HTTP ───▶ │ Player: East LED      │  ...  │ Player: Atrium        │
+     └──── TCP/HTTP ───▶ │ Player: LED 1         │  ...  │ Player: LED 2         │
                          │ web GUI · cues · media│       │                       │
                          │ GStreamer engine      │       │                       │
                          └──┬─────────────┬──────┘       └───────────────────────┘
@@ -137,7 +137,7 @@ The Settings tab shows a live diagram of the canvas inside the display raster. S
 
 - **Control page:** a large **Normal** button, plus Black and Next, a grid of **Scenario** buttons and a grid of **Event** buttons, each with an active LED. It also shows mode, the locked state, the active cue and what's playing.
 - **Automatic labels:** buttons take their labels and colours from the unit's cue list, refreshed every minute. Scenario cues fill the Scenario buttons and event cues fill the Event buttons, in cue-number order, so renaming a cue in the web GUI updates the panel. Turn on *Manual* on the Setup page to type a cue number per button instead.
-- **Setup page:** IP address, TCP port (7700), HTTP port (8080), API token, and, when connecting to a master, a *Target* (`ALL`, `GROUP east` or `SCREEN atrium`).
+- **Setup page:** IP address, TCP port (7700), HTTP port (8080), API token, and, when connecting to a master, a *Target* (`ALL`, `GROUP main` or `SCREEN led-2`).
 - **Properties:** *Connect To* (Player or Master) and how many scenario and event buttons to show.
 
 Every control has a pin, so the buttons can also be driven from other Q-SYS logic, such as a fire-panel contact closure into *Scenario 7*.
@@ -174,9 +174,9 @@ TCP clients receive `EVENT mode=… cue=… media="…"` whenever playback chang
 GCUE 10                       global cue (multi-screen actions)
 CUE 3                         global cue 3 if defined, else ALL CUE 3
 ALL BLACK
-GROUP east CUE 3 LOOP
-SCREEN atrium PLAY "Welcome" HOLD
-east DEFAULT                  bare group or screen name also works
+GROUP main CUE 3 LOOP
+SCREEN led-2 PLAY "Welcome" HOLD
+main DEFAULT                  bare group or screen name also works
 STATUS                        one STATUS line per screen
 ```
 
@@ -207,7 +207,7 @@ Master:
 GET  /api/gcue/{n|label}
 GET  /api/target/{all|group:<g>|screen:<id|name>}/{cue|play|default|black|stop|next}[/{ref}]
 GET  /api/screens        POST /api/screens       PATCH/DELETE /api/screens/{id}
-POST /api/media (file, category, targets=all,group:east)    POST /api/sync
+POST /api/media (file, category, targets=all,group:main)    POST /api/sync
 GET/PUT/DELETE /api/gcues/{n}       GET/PUT/DELETE /api/cues/{n} (shared player cue list)
 ```
 
@@ -261,7 +261,7 @@ Settings → *Media conversion* has the mode (`auto`, `always` or `off`), whethe
 
 ## How the master distributes media
 
-- Media uploaded on the master has **targets** (`all`, `group:east`, `screen:atrium`, comma separated). The master pushes each file to the matching screens using the same media id, checks it by SHA-256 so unchanged files are never re-sent, and tags it as *managed by master*.
+- Media uploaded on the master has **targets** (`all`, `group:main`, `screen:led-2`, comma separated). The master pushes each file to the matching screens using the same media id, checks it by SHA-256 so unchanged files are never re-sent, and tags it as *managed by master*.
 - Changing targets or deleting media on the master removes it from screens that no longer need it. **Media uploaded directly on a screen is never touched**, so operators can still drop in last-minute event files locally.
 - The **shared cue list** is pushed to screens that have *Sync cue list* enabled, so cue 3 means the same thing everywhere. **Global cues** live only on the master and can do different things on different screens from one trigger.
 
