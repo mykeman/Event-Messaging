@@ -489,11 +489,11 @@ class GstEngine(BaseEngine):
         self.status.pop("display_refresh", None)
         if kind == "kms":
             # kmssink's own modesetting picks the first mode with the right resolution,
-            # which is nearly always 60 Hz. When the boot command line already set the
-            # mode (install.sh --take-hdmi), keep it so its refresh rate is honoured.
+            # which is nearly always 60 Hz. "keep" reuses the mode set at boot
+            # (install.sh --take-hdmi) so its refresh rate is honoured - experimental: on
+            # some Pi setups kmssink then draws nothing, so it's opt-in.
             boot = [m for m in boot_video_modes().values() if m[:2] == (dw, dh)]
-            modeset = disp.get("modeset", "auto")
-            keep = (modeset == "keep" or (modeset == "auto" and bool(boot))) and not self._modeset_fallback
+            keep = disp.get("modeset", "auto") == "keep" and not self._modeset_fallback
             sink = self._make("kmssink", force_modesetting=not keep)
             if int(disp.get("connector_id") or 0) > 0:
                 sink.set_property("connector-id", int(disp["connector_id"]))
@@ -507,9 +507,12 @@ class GstEngine(BaseEngine):
                 self.status["display_refresh"] = refresh
             if not cadence_ok(fps, refresh):
                 self.status["display_warning"] = (
-                    f"A {fps:g} fps canvas on a {refresh:g} Hz output judders. Run "
-                    f"sudo ./deploy/install.sh --take-hdmi --hdmi-mode {dw}x{dh}@{fps:g} and reboot, "
-                    f"or set the canvas to {int(refresh) if fps * 2 > refresh else int(refresh / 2)} fps.")
+                    f"A {fps:g} fps canvas on a {refresh:g} Hz output judders. "
+                    + (f"Set the canvas (and content) to "
+                       f"{int(refresh) if fps * 2 > refresh else int(refresh / 2)} fps, or try "
+                       f"Display mode 'keep' with install.sh --take-hdmi --hdmi-mode {dw}x{dh}@{fps:g} "
+                       f"(experimental)." if not keep else
+                       f"Re-run install.sh --take-hdmi --hdmi-mode {dw}x{dh}@{fps:g} and reboot."))
         elif kind == "gl":
             sink = self._make("glimagesink")
         elif kind == "x":

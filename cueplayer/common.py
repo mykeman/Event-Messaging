@@ -14,6 +14,17 @@ VERSION = "1.0.0"
 WEB_DIR = Path(__file__).parent / "web"
 
 
+def no_cache_gui(app) -> None:
+    """Make browsers revalidate the GUI files on every load (cheap: ETag -> 304), so an
+    update is picked up without a hard refresh."""
+    @app.middleware("http")
+    async def _no_cache(request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def check_token(expected: str, provided: Optional[str]) -> bool:
     if not expected:
         return True

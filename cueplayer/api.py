@@ -12,7 +12,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .common import (VERSION, WEB_DIR, Broadcaster, as_bool, as_float, as_int, hostname,
+from .common import (VERSION, WEB_DIR, Broadcaster, no_cache_gui, as_bool, as_float, as_int, hostname,
                      make_auth, params, ws_authorised)
 from .controller import Blocked, Controller, PlayError
 from .library import CATEGORIES, Library
@@ -331,6 +331,7 @@ def create_player_app(ctrl: Controller) -> FastAPI:
         return FileResponse(WEB_DIR / "player.html")
 
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+    no_cache_gui(app)
 
     @app.exception_handler(Exception)
     async def unhandled(_req, exc):  # pragma: no cover

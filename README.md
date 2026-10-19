@@ -8,7 +8,7 @@ CuePlayer is for places that run a rotation of standard messaging and need to sw
 - **Media library** split into *standard* generic messaging and *event-specific* files (video or image), with drag-and-drop upload in the web GUI and optional auto-delete dates for event content.
 - **Standard scenarios**: a ready-made set of situations every venue needs a message for: venue at capacity, entry closed, event delayed, severe weather, lost child, medical emergency, fire alarm, evacuate now and shelter in place (cues 101–109). Assign your content to each. Emergency scenarios are **locked**: they stay on screen until *Normal* is pressed, and ordinary triggers can't replace them.
 - **Event cues**: numbered/labelled presets for event-specific content, optionally a sequence of items, with loop, duration and *then* behaviour (return to normal, hold the last frame, black, or chain to another cue).
-- **"Everything is normal" playlist**: the fallback that plays whenever no scenario or event cue is active.
+- **Normal playlist**: the fallback that plays whenever no scenario or event cue is active.
 - **Automatic media conversion**: each unit checks its own hardware and converts files it would struggle to play (codec, size, frame rate, 10-bit, interlaced) to an optimised H.264 copy in the background.
 - **Custom output raster**: compose at the LED processor's exact pixel map, with fit/fill/stretch/1:1 scaling per item, and place the canvas anywhere in the HDMI raster (with optional rescale).
 - **NDI output** of the canvas for monitoring and remote displays, plus a live preview in the web GUI.
@@ -155,7 +155,7 @@ CUE 3                               → OK mode=cue cue=3 media="Welcome" id=…
 CUE welcome LOOP                    cue by label, with option overrides
 PLAY "Gala Opening" HOLD            ad-hoc media by name, id or filename
 PLAY gala DURATION=30 AFTER=cue:1
-NORMAL | CLEAR | DEFAULT            back to the "everything is normal" playlist (clears a locked scenario)
+NORMAL | CLEAR | DEFAULT            back to the normal playlist (clears a locked scenario)
 CUE 1 FORCE                         override a locked scenario
 BLACK FADE=1000
 NEXT

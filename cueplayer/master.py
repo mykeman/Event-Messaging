@@ -26,7 +26,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .common import (VERSION, WEB_DIR, Broadcaster, as_bool, as_float, as_int, hostname,
+from .common import (VERSION, WEB_DIR, Broadcaster, no_cache_gui, as_bool, as_float, as_int, hostname,
                      make_auth, params, ws_authorised)
 from .config import Settings
 from .library import CATEGORIES, Library, _atomic_write
@@ -593,6 +593,7 @@ def create_master_app(fleet: Fleet) -> FastAPI:
         return FileResponse(WEB_DIR / "master.html")
 
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+    no_cache_gui(app)
     return app
 
 
