@@ -36,7 +36,7 @@ DEFAULTS: Dict[str, Any] = {
         "y": 0,
         "out_width": 0,   # 0 = same as canvas
         "out_height": 0,
-        # kmssink only: DRM connector id (0 = first connected)
+        # kmssink only: DRM connector id (0 = auto: the port with a display plugged in)
         "connector_id": 0,
         # kmssink only. auto: kmssink sets the mode (the first one at width x height,
         # usually 60 Hz). keep (experimental): reuse the mode set at boot by

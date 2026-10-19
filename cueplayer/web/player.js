@@ -14,7 +14,7 @@ const SETTINGS_FORM = [
       ["width", "Display width", "number"], ["height", "Display height", "number"],
       ["x", "Offset X", "number"], ["y", "Offset Y", "number"],
       ["out_width", "Out width", "number"], ["out_height", "Out height", "number"],
-      ["connector_id", "DRM connector (kms)", "number"],
+      ["connector_id", "DRM connector (0 = auto)", "number"],
       ["modeset", "Display mode (kms)", "select", ["auto", "keep"]]] },
   { section: "ndi", title: "NDI output", fields: [["enabled", "Enabled", "check"], ["name", "Source name", "text", null, "wide"]] },
   { section: "transcode", title: "Media conversion", note: "Files this unit would struggle to play (codec, size, frame rate, 10-bit, interlaced) get an optimised H.264 copy in the background. The original plays until it's ready.",

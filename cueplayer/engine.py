@@ -71,6 +71,21 @@ def boot_video_modes(cmdline: Optional[str] = None) -> Dict[str, Tuple[int, int,
     return out
 
 
+def detect_display_connector(drm: str = "/sys/class/drm") -> Optional[Tuple[int, str]]:
+    """(connector id, name) of the first connector with a display actually attached (it has
+    an EDID). kmssink's own choice is the first connector reporting "connected", which can be
+    an empty port that video=...D on the kernel command line forced on."""
+    for path in sorted(Path(drm).glob("card*-*")):
+        try:
+            if path.joinpath("edid").stat().st_size == 0:
+                continue
+            cid = int(path.joinpath("connector_id").read_text().strip())
+        except (OSError, ValueError):
+            continue
+        return cid, re.sub(r"^card\d+-", "", path.name)
+    return None
+
+
 def cadence_ok(fps: float, refresh: float) -> bool:
     """True when every frame is shown for the same number of refreshes (e.g. 25 or 50 fps
     on 50 Hz, 30 or 60 fps on 60 Hz). Otherwise motion judders even with no dropped frames."""
@@ -495,14 +510,23 @@ class GstEngine(BaseEngine):
             boot = [m for m in boot_video_modes().values() if m[:2] == (dw, dh)]
             keep = disp.get("modeset", "auto") == "keep" and not self._modeset_fallback
             sink = self._make("kmssink", force_modesetting=not keep)
+            port_note = ""
             if int(disp.get("connector_id") or 0) > 0:
                 sink.set_property("connector-id", int(disp["connector_id"]))
+                port_note = f"connector {int(disp['connector_id'])}"
+            else:
+                found = detect_display_connector()
+                if found:
+                    sink.set_property("connector-id", found[0])
+                    port_note = found[1]
             if keep:
                 refresh = boot[0][2] if boot else 0.0
                 mode_note = f"@{refresh:g}Hz (boot mode)" if refresh else "(current mode)"
             else:
                 refresh = 60.0
                 mode_note = "(mode picked by kmssink, usually 60 Hz)"
+            if port_note:
+                mode_note = f"on {port_note} {mode_note}"
             if refresh:
                 self.status["display_refresh"] = refresh
             if not cadence_ok(fps, refresh):

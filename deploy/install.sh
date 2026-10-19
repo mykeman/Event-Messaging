@@ -6,7 +6,7 @@
 #   sudo ./deploy/install.sh --with-ndi       # also install NDI output (see install-ndi.sh)
 #   sudo ./deploy/install.sh --take-hdmi      # dedicate the HDMI output to CuePlayer (appliance mode)
 #        [--hdmi-mode 1920x1080@60]           #   force this mode, even with no display/EDID at boot
-#        [--hdmi-port HDMI-A-1]               #   which port to force on (HDMI-A-2 = 2nd port on Pi 4/5)
+#        [--hdmi-port HDMI-A-1]               #   which port (default: the one with a display plugged in)
 #
 # --take-hdmi: no boot text, logo, cursor or login prompt on HDMI, no desktop, HDMI forced
 # on at the given mode, and the player set to direct KMS output. Needs a reboot.
@@ -19,7 +19,7 @@ ROLE=player
 WITH_NDI=0
 TAKE_HDMI=0
 HDMI_MODE=1920x1080@60
-HDMI_PORT=HDMI-A-1
+HDMI_PORT=""
 PREFIX=/opt/cueplayer
 DATA=/var/lib/cueplayer
 SVC_USER=cueplayer
@@ -43,6 +43,19 @@ if [[ "$TAKE_HDMI" == 1 ]]; then
   [[ "$ROLE" == player ]] || { echo "--take-hdmi only applies to --role player"; exit 1; }
   [[ "$HDMI_MODE" =~ ^([0-9]+)x([0-9]+)@([0-9]+)$ ]] || { echo "--hdmi-mode must look like 1920x1080@60"; exit 1; }
   HDMI_W=${BASH_REMATCH[1]}; HDMI_H=${BASH_REMATCH[2]}
+  if [[ -z "$HDMI_PORT" ]]; then
+    # Use the port a display is actually plugged into (it has an EDID). Forcing the wrong
+    # port on sends the video to an empty socket while the screen shows a blank console.
+    for p in /sys/class/drm/card*-HDMI-A-*; do
+      [[ -e "$p/edid" && -s "$p/edid" ]] && { HDMI_PORT=$(basename "$p" | sed 's/^card[0-9]*-//'); break; }
+    done
+    if [[ -n "$HDMI_PORT" ]]; then
+      echo "==> Display detected on $HDMI_PORT"
+    else
+      HDMI_PORT=HDMI-A-1
+      echo "!! No display detected on any HDMI port - using $HDMI_PORT (override with --hdmi-port)"
+    fi
+  fi
   [[ "$HDMI_PORT" =~ ^HDMI-A-[0-9]$ ]] || { echo "--hdmi-port must look like HDMI-A-1"; exit 1; }
 fi
 
@@ -147,7 +160,7 @@ if [[ "$TAKE_HDMI" == 1 ]]; then
 import sys
 path, port, mode = sys.argv[1:4]
 toks = open(path).read().split()
-toks = [t for t in toks if not (t.startswith("video=" + port + ":") or t in ("console=tty1", "console=tty3", "quiet")
+toks = [t for t in toks if not (t.startswith("video=HDMI-A-") or t in ("console=tty1", "console=tty3", "quiet")
         or t.split("=")[0] in ("loglevel", "logo.nologo", "vt.global_cursor_default", "consoleblank"))]
 toks += ["console=tty3", "quiet", "loglevel=3", "logo.nologo", "vt.global_cursor_default=0",
          "consoleblank=0", f"video={port}:{mode}D"]
