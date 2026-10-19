@@ -534,8 +534,8 @@ class GstEngine(BaseEngine):
                     f"A {fps:g} fps canvas on a {refresh:g} Hz output judders. "
                     + (f"Set the canvas (and content) to "
                        f"{int(refresh) if fps * 2 > refresh else int(refresh / 2)} fps, or try "
-                       f"Display mode 'keep' with install.sh --take-hdmi --hdmi-mode {dw}x{dh}@{fps:g} "
-                       f"(experimental)." if not keep else
+                       f"Display mode 'keep' with install.sh --take-hdmi --hdmi-mode {dw}x{dh}@{fps:g}."
+                       if not keep else
                        f"Re-run install.sh --take-hdmi --hdmi-mode {dw}x{dh}@{fps:g} and reboot."))
         elif kind == "gl":
             sink = self._make("glimagesink")
