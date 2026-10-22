@@ -110,6 +110,37 @@ def hdmi_alsa_device(port: Optional[str], cards: Optional[str] = None) -> Option
     return f"hdmi:CARD={card},DEV=0" if card else None
 
 
+def edid_has_audio(edid: bytes) -> Optional[bool]:
+    """Whether a display's EDID says it accepts audio over HDMI (CEA-861 extension: the
+    basic-audio flag or an audio data block). None if the EDID can't be read."""
+    if len(edid) < 128:
+        return None
+    for i in range(1, min(edid[126], 4) + 1):
+        blk = edid[128 * i:128 * (i + 1)]
+        if len(blk) < 4 or blk[0] != 0x02:
+            continue
+        if blk[3] & 0x40:          # basic audio
+            return True
+        end, pos = blk[2], 4        # data blocks run from byte 4 to the DTD offset
+        while 4 <= pos < min(end, 127):
+            tag, length = blk[pos] >> 5, blk[pos] & 0x1F
+            if tag == 1 and length:  # audio data block
+                return True
+            pos += 1 + length
+    return False                    # no CEA extension or no audio: DVI-style input
+
+
+def display_accepts_audio(port: Optional[str], drm: str = "/sys/class/drm") -> Optional[bool]:
+    if not port:
+        return None
+    for path in Path(drm).glob(f"card*-{port}"):
+        try:
+            return edid_has_audio(path.joinpath("edid").read_bytes())
+        except OSError:
+            return None
+    return None
+
+
 def audio_server_running() -> bool:
     """A PipeWire/PulseAudio server this process can use (desktop sessions)."""
     run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
@@ -474,7 +505,9 @@ class GstEngine(BaseEngine):
         # --- audio core (optional) ---
         aes = settings.get("aes67") or {}
         atee = None
-        if audio.get("enabled"):
+        if audio.get("enabled") and "audio" in self._disabled_outputs:
+            self.status["audio"] = "disabled after repeated errors (save settings to retry)"
+        elif audio.get("enabled"):
             try:
                 atee = self._build_audio(audio, low_latency=bool(aes.get("enabled")))
                 self.status["audio"] = self._audio_note
@@ -645,8 +678,14 @@ class GstEngine(BaseEngine):
             hdmi = hdmi_alsa_device(self._display_port)
             if kind == "auto" and not audio_server_running() and (device or hdmi):
                 kind = "alsa"  # no desktop sound server: talk to ALSA directly
+            if kind == "alsa" and not device and hdmi and display_accepts_audio(self._display_port) is False:
+                # vc4 refuses to open HDMI audio (error -524) when the display has none
+                self._audio_note = (f"off: the display on {self._display_port} doesn't accept audio "
+                                    f"over HDMI (per its EDID). Use its audio input or set an ALSA device.")
+                self._error(self._audio_note)
+                return atee
             if kind == "alsa":
-                sink = self._make("alsasink")
+                sink = self._make("alsasink", "audio_sink")
                 device = device or hdmi or ""
                 if device:
                     sink.set_property("device", device)
@@ -655,10 +694,10 @@ class GstEngine(BaseEngine):
                 self._audio_note = f"on (alsa {device or 'default'}" + (
                     f", follows video on {self._display_port})" if device == hdmi and hdmi else ")")
             elif kind == "pulse":
-                sink = self._make("pulsesink")
+                sink = self._make("pulsesink", "audio_sink")
                 self._audio_note = "on (pulse)"
             else:
-                sink = self._make("autoaudiosink")
+                sink = self._make("autoaudiosink", "audio_sink")
                 self._audio_note = "on (auto)"
             self._branch(atee, self._make("queue", leaky=2), self._make("audioconvert"),
                          self._make("audioresample"), sink)
@@ -1090,8 +1129,12 @@ class GstEngine(BaseEngine):
             self.status["running"] = False
             # A sink that keeps failing (unplugged HDMI, NDI runtime problem) is switched
             # off so the other outputs keep running instead of restart-looping.
-            out = {"display_sink": "display", "ndi_sink": "ndi",
-                   "aes67_sink": "aes67"}.get(msg.src.get_name())
+            name = msg.src.get_name()
+            parent = msg.src.get_parent()
+            if parent is not None and parent.get_name() == "audio_sink":
+                name = "audio_sink"  # the real sink inside autoaudiosink
+            out = {"display_sink": "display", "ndi_sink": "ndi", "aes67_sink": "aes67",
+                   "audio_sink": "audio"}.get(name)
             if out == "display" and not self._modeset_fallback and \
                     msg.src.find_property("force-modesetting") and \
                     not msg.src.get_property("force-modesetting"):

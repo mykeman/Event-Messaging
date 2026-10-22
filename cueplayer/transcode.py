@@ -125,17 +125,44 @@ def build_command(src: Path, dest: Path, target: Dict[str, Any], opts: Dict[str,
     fps = target["fps"]
     vf = (["yadif=mode=send_frame"] if target.get("deinterlace") else []) + [
         f"scale={w}:{h}:flags=lanczos", f"fps={fps:g}", "format=yuv420p"]
-    level = ["-level:v", "4.2"] if w * h <= 1920 * 1088 else []
     gop = max(1, int(round(fps * 2)))
     return base + [
         "-progress", "pipe:1", "-nostats", "-i", str(src),
         "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
         "-vf", ",".join(vf),
         "-c:v", "libx264", "-preset", str(opts.get("preset") or "veryfast"),
-        "-crf", str(int(opts.get("crf") or 20)), "-profile:v", "high", *level,
+        # No forced -level: x264 picks the lowest level the stream needs (4.0 for 1080p30),
+        # like typical camera/web files. A forced 4.2 made Pi hardware decoders refuse it.
+        "-crf", str(int(opts.get("crf") or 20)), "-profile:v", "high",
         "-g", str(gop), "-threads", str(threads),
         "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
         "-movflags", "+faststart", "-f", "mp4", str(dest)]
+
+
+def hw_decode_check(path: Path) -> Tuple[Optional[bool], str]:
+    """Decode the first frames of an H.264 MP4 with this unit's hardware decoder.
+    Returns (True, "") if it works, (False, reason) if not, (None, "") if there is no
+    hardware H.264 decoder or GStreamer tools to test with."""
+    dec = hwinfo.detect().get("hw_decoders", {}).get("h264")
+    tool = shutil.which("gst-launch-1.0")
+    if not dec or not tool:
+        return None, ""
+    cmd = [tool, "-q", "filesrc", f"location={path}", "!", "qtdemux", "name=d", "d.video_0",
+           "!", "queue", "!", "h264parse", "!", dec, "!", "fakesink", "num-buffers=30"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (subprocess.SubprocessError, OSError) as e:
+        return None, str(e)
+    if r.returncode == 0:
+        return True, ""
+    err = (r.stderr or r.stdout or "").strip().splitlines()
+    why = next((l for l in reversed(err) if "reason" in l or "ERROR" in l), err[-1] if err else "")
+    return False, why[-200:]
+
+
+# Bump when the video encoder settings change in a way old copies should be redone for.
+# 2: no forced H.264 level (4.2 made Pi hardware decoders refuse copies).
+ENCODER_REV = 2
 
 
 class Transcoder:
@@ -180,8 +207,10 @@ class Transcoder:
             self.lib.set_playback(item_id, status="original", reasons=a["reasons"],
                                   target=a["target"], disabled=a.get("disabled", False),
                                   skip=bool(pb.get("skip")) and not force)
-        elif pb.get("status") == "ready" and pb.get("target") == a["target"] and not force:
-            pass  # already have the right copy
+        elif pb.get("status") == "ready" and pb.get("target") == a["target"] and not force \
+                and (item["kind"] != "video" or pb.get("rev", 1) >= ENCODER_REV
+                     or pb.get("original_removed")):
+            pass  # already have the right copy (video copies from older settings are redone)
         elif not hwinfo.detect().get("encoder") and item["kind"] == "video":
             self.lib.set_playback(item_id, status="failed", reasons=a["reasons"], target=a["target"],
                                   error="ffmpeg with libx264 is not installed")
@@ -294,5 +323,14 @@ class Transcoder:
         os.replace(part, dest)
         keep = tc.get("keep_original", True)
         self.lib.finish_playback_copy(item_id, name, target, keep_original=keep)
+        self.lib.set_playback(item_id, rev=ENCODER_REV)
         log.info("converted %s -> %s (%dx%d)", item["name"], name, target["width"], target["height"])
+        if target["kind"] == "video":
+            ok, why = hw_decode_check(dest)
+            if ok is False:
+                log.warning("hardware decoder can't play %s (%s) - using software decoding", name, why)
+                self.lib.set_decode(item_id, "software")
+                self.lib.set_playback(item_id, hw_check=f"hardware decoder refused this copy: {why}")
+            elif ok:
+                self.lib.set_playback(item_id, hw_check="ok")
         self.notify(force=True)

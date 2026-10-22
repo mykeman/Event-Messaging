@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from cueplayer.engine import boot_video_modes, cadence_ok, detect_display_connector, hdmi_alsa_device  # noqa: E402
+from cueplayer.engine import boot_video_modes, cadence_ok, detect_display_connector, edid_has_audio, hdmi_alsa_device  # noqa: E402
 import tempfile  # noqa: E402
 
 failures = 0
@@ -51,6 +51,20 @@ check("HDMI-A-1 -> vc4hdmi0", hdmi_alsa_device("HDMI-A-1", PI_CARDS) == "hdmi:CA
 check("HDMI-A-2 -> vc4hdmi1", hdmi_alsa_device("HDMI-A-2", PI_CARDS) == "hdmi:CARD=vc4hdmi1,DEV=0")
 check("unknown port -> default", hdmi_alsa_device(None, PI_CARDS) is None and hdmi_alsa_device("HDMI-A-3", PI_CARDS) is None)
 check("non-Pi HDMI cards -> default", hdmi_alsa_device("HDMI-A-1", " 0 [PCH ]: HDA-Intel\n 1 [HDMI ]: HDA-Intel\n") is None)
+
+# EDID audio support (CEA-861 extension)
+def edid(ext=None):
+    base = bytearray(128)
+    base[126] = 1 if ext is not None else 0
+    return bytes(base) + (bytes(ext) if ext is not None else b"")
+cea_basic = bytearray(128); cea_basic[:4] = b"\x02\x03\x10\x40"
+cea_adb = bytearray(128); cea_adb[:4] = b"\x02\x03\x10\x00"; cea_adb[4:8] = bytes([(1 << 5) | 3, 0x09, 0x07, 0x07])
+cea_none = bytearray(128); cea_none[:4] = b"\x02\x03\x10\x00"; cea_none[4:6] = bytes([(2 << 5) | 1, 0x10])
+check("EDID basic-audio flag -> audio", edid_has_audio(edid(cea_basic)) is True)
+check("EDID audio data block -> audio", edid_has_audio(edid(cea_adb)) is True)
+check("EDID with CEA but no audio -> no audio", edid_has_audio(edid(cea_none)) is False)
+check("EDID without extension (DVI-style) -> no audio", edid_has_audio(edid()) is False)
+check("unreadable EDID -> unknown", edid_has_audio(b"") is None)
 
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)
