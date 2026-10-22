@@ -262,14 +262,26 @@ class Transcoder:
         self.notify(force=True)
         duration_us = float(item.get("duration") or 0) * 1e6
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        for line in self.proc.stdout:  # -progress key=value lines (video only)
-            if line.startswith("out_time_us=") and duration_us:
-                try:
-                    pct = min(99.0, int(line.split("=")[1]) / duration_us * 100)
-                except ValueError:
-                    continue
-                self.lib.set_playback(item_id, progress=round(pct, 1))
-                self.notify()
+        block: Dict[str, str] = {}
+        for line in self.proc.stdout:  # -progress emits key=value blocks ending in progress=
+            key, _, value = line.strip().partition("=")
+            block[key] = value
+            if key != "progress" or not duration_us:
+                continue
+            try:
+                done_us = int(block.get("out_time_us") or 0)
+            except ValueError:
+                done_us = 0
+            pct = min(99.0, max(0.0, done_us / duration_us * 100))
+            try:
+                speed = float((block.get("speed") or "").rstrip("x"))
+            except ValueError:
+                speed = 0.0
+            eta = (duration_us - done_us) / 1e6 / speed if speed > 0 else None
+            self.lib.set_playback(item_id, progress=round(pct, 1), speed=round(speed, 2) or None,
+                                  eta=round(eta) if eta is not None else None)
+            self.notify()
+            block = {}
         err = self.proc.stderr.read()
         rc = self.proc.wait()
         if item_id in self._cancel or self.lib.get(item_id) is None:

@@ -173,3 +173,18 @@ pre.api { background: #0a0c10; border: 1px solid var(--line); padding: 12px; bor
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; font-size: 13px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; overflow-wrap: anywhere; }
+
+/* activity overlay */
+#jobs { position: fixed; left: 16px; bottom: 16px; width: min(360px, calc(100vw - 32px)); z-index: 90;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,.45); }
+#jobs .jobs-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px;
+  border-bottom: 1px solid var(--line); }
+#jobs.collapsed .jobs-list { display: none; }
+#jobs .jobs-list { display: grid; gap: 10px; padding: 10px 12px; max-height: 50vh; overflow: auto; }
+#jobs .job { display: grid; gap: 4px; min-width: 0; }
+#jobs .job-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+#jobs .job-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#jobs .job.done .job-title { color: var(--ok); }
+#jobs .job.error .job-title, #jobs .job.error .job-detail { color: #fca5a5; white-space: normal; }
+.progress.indeterminate > div { width: 30% !important; animation: indet 1.2s ease-in-out infinite; }
+@keyframes indet { from { margin-left: -30%; } to { margin-left: 100%; } }

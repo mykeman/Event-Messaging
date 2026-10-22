@@ -78,12 +78,12 @@ setInterval(() => { if ($("#tab-screens").classList.contains("active") && !docum
 
 function editScreen(s) {
   const isNew = !s;
-  s = s || { name: "", url: "http://", groups: [], enabled: true, sync_cues: false };
+  s = s || { name: "", url: "", groups: [], enabled: true, sync_cues: false };
   const d = el("dialog", {},
     el("h2", {}, isNew ? "Add screen" : "Edit " + s.name),
     el("form", { method: "dialog", class: "grid" },
       el("label", { class: "field" }, el("span", {}, "Name"), el("input", { name: "name", value: s.name, required: true })),
-      el("label", { class: "field" }, el("span", {}, "Player URL"), el("input", { name: "url", value: s.url, placeholder: "http://10.0.0.21:8080", required: true })),
+      el("label", { class: "field" }, el("span", {}, "Player address (IP or hostname)"), el("input", { name: "url", value: s.url, placeholder: "10.0.0.21 or led1.local", required: true })),
       el("label", { class: "field" }, el("span", {}, "Player API token" + (s.has_token ? " (set — leave blank to keep)" : "")), el("input", { name: "token", type: "password", autocomplete: "off" })),
       el("label", { class: "field" }, el("span", {}, "Groups (comma separated)"), el("input", { name: "groups", value: (s.groups || []).join(", ") })),
       el("label", { class: "check" }, el("input", { type: "checkbox", name: "enabled", checked: s.enabled !== false }), "Enabled"),
@@ -191,20 +191,29 @@ function renderMediaList() {
 }
 
 async function uploadFiles(files) {
-  for (const f of files) {
-    const bar = el("div", { class: "progress" }, el("div"));
-    const pct = el("span", { class: "mono" }, "0%");
-    const row = el("div", { class: "upload-row" }, el("span", {}, f.name), bar, pct);
-    $("#uploads").append(row);
+  await Promise.all(files.map(async f => {
     const fd = new FormData();
     fd.append("file", f);
     fd.append("category", $("#up-category").value);
     fd.append("targets", $("#up-targets").value || "all");
     fd.append("expires", $("#up-expires").value);
-    try {
-      await upload("/api/media", fd, p => { bar.firstChild.style.width = (p * 100) + "%"; pct.textContent = Math.round(p * 100) + "%"; });
-      pct.textContent = "✓"; setTimeout(() => row.remove(), 2500);
-    } catch (e) { pct.textContent = "✗"; toast(f.name + ": " + e.message, "err"); }
+    try { await uploadWithProgress("/api/media", fd, f); }
+    catch (e) { toast(f.name + ": " + e.message, "err"); }
+  }));
+}
+
+/* Media being sent to screens, in the activity overlay */
+function syncSyncJobs() {
+  for (const s of M.screens) {
+    const key = "sync:" + s.id, j = s.sync;
+    if (j && j.state === "running") {
+      jobs.set(key, { title: `Sending media to ${s.name}`,
+        detail: j.total ? `${j.current ? j.current + " · " : ""}${j.uploaded} of ${j.total} files` : "Checking what's needed…",
+        pct: j.total ? (j.uploaded / j.total) * 100 : null });
+    } else if (jobs.has(key)) {
+      if (j && j.state === "error") jobs.fail(key, `${s.name}: ${j.error}`);
+      else jobs.done(key, j ? `${s.name}: ${j.uploaded} sent, ${j.removed} removed` : s.name);
+    }
   }
 }
 
@@ -262,10 +271,32 @@ function renderSettings() {
 }
 
 /* ---------------- loading ---------------- */
+/* Players found via mDNS */
+async function loadFound() {
+  let d;
+  try { d = await api("GET", "/api/discovered", undefined, { quiet: true }); } catch { return; }
+  const box = $("#found");
+  const list = d.players || [];
+  if (!d.available) {
+    box.replaceChildren(el("div", { class: "small muted" }, "Network discovery is unavailable" + (d.error ? ": " + d.error : "") + ". Add players by IP address."));
+    return;
+  }
+  if (!list.length) { box.replaceChildren(el("div", { class: "small muted" }, "Searching… no players found yet. Players must be on the same network (mDNS doesn't cross routers).")); return; }
+  box.replaceChildren(...list.map(p => el("div", { class: "row between", style: { background: "var(--panel-2)", border: "1px solid var(--line)", borderRadius: "8px", padding: "8px 10px" } },
+    el("div", {}, el("b", {}, p.name), " ",
+      el("span", { class: "small muted" }, `${p.addresses[0]}:${p.port}` + (p.host ? ` · ${p.host}` : "") + (p.version ? ` · v${p.version}` : "")),
+      ...(p.groups || []).map(g => el("span", { class: "chip", style: { marginLeft: "6px" } }, g))),
+    p.added ? el("span", { class: "small", style: { color: "var(--ok)" } }, "✓ Added")
+      : el("button", { class: "primary", onclick: async () => {
+          await api("POST", "/api/screens", { name: p.name, url: p.url, groups: (p.groups || []).join(",") });
+          toast(p.name + " added", "ok"); loadScreens(); loadFound();
+        } }, "Add"))));
+}
+
 async function loadScreens() {
   [M.screens, M.groups] = await Promise.all([api("GET", "/api/screens"), api("GET", "/api/groups")]);
   for (const id of [...M.selected]) if (!M.screens.find(s => s.id === id)) M.selected.delete(id);
-  renderScreens(); renderTargets();
+  renderScreens(); renderTargets(); syncSyncJobs();
 }
 async function loadMedia() { M.media = await api("GET", "/api/media"); renderMediaList(); }
 async function loadGcues() { M.gcues = await api("GET", "/api/gcues"); renderGcueButtons(); renderGcueEditor(); }
@@ -288,6 +319,16 @@ async function init() {
   $("#t-default").onclick = () => sendTarget("normal");
   $("#t-black").onclick = () => sendTarget("black");
   $("#screen-add").onclick = () => editScreen(null);
+  $("#quick-add").onsubmit = async e => {
+    e.preventDefault();
+    const v = $("#quick-add-ip").value.trim();
+    if (!v) return;
+    await api("POST", "/api/screens", { name: v, url: v });
+    $("#quick-add-ip").value = ""; toast(v + " added — it will show its own name once it's online", "ok");
+    loadScreens(); loadFound();
+  };
+  loadFound();
+  setInterval(() => { if ($("#tab-screens").classList.contains("active") && !document.hidden) loadFound(); }, 10000);
   $("#sync-all").onclick = async () => { await api("POST", "/api/sync"); toast("Sync started", "ok"); };
   $("#gcue-add").onclick = () => {
     const nums = Object.keys(M.gcues).filter(n => /^\d+$/.test(n)).map(Number);
@@ -312,6 +353,7 @@ async function init() {
 
   let pending = null;
   connectWS(msg => {
+    if (msg.event === "discovered") loadFound();
     if (["screens", "screen"].includes(msg.event)) {
       clearTimeout(pending); pending = setTimeout(loadScreens, 150);   // coalesce bursts
     }

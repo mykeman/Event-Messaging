@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from cueplayer.engine import boot_video_modes, cadence_ok, detect_display_connector  # noqa: E402
+from cueplayer.engine import boot_video_modes, cadence_ok, detect_display_connector, hdmi_alsa_device  # noqa: E402
 import tempfile  # noqa: E402
 
 failures = 0
@@ -39,6 +39,18 @@ with tempfile.TemporaryDirectory() as d:
           detect_display_connector(d) == (42, "HDMI-A-2"), detect_display_connector(d))
     Path(d, "card1-HDMI-A-2", "edid").write_bytes(b"")
     check("no display -> None (kmssink chooses)", detect_display_connector(d) is None)
+
+# HDMI audio follows the video port on a Pi
+PI_CARDS = """ 0 [vc4hdmi0       ]: vc4-hdmi - vc4-hdmi-0
+                      vc4-hdmi-0
+ 1 [vc4hdmi1       ]: vc4-hdmi - vc4-hdmi-1
+                      vc4-hdmi-1
+ 2 [Headphones     ]: bcm2835_headphonbcm2835 Headphones - bcm2835 Headphones
+"""
+check("HDMI-A-1 -> vc4hdmi0", hdmi_alsa_device("HDMI-A-1", PI_CARDS) == "hdmi:CARD=vc4hdmi0,DEV=0")
+check("HDMI-A-2 -> vc4hdmi1", hdmi_alsa_device("HDMI-A-2", PI_CARDS) == "hdmi:CARD=vc4hdmi1,DEV=0")
+check("unknown port -> default", hdmi_alsa_device(None, PI_CARDS) is None and hdmi_alsa_device("HDMI-A-3", PI_CARDS) is None)
+check("non-Pi HDMI cards -> default", hdmi_alsa_device("HDMI-A-1", " 0 [PCH ]: HDA-Intel\n 1 [HDMI ]: HDA-Intel\n") is None)
 
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)

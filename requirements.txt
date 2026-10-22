@@ -3,4 +3,5 @@ uvicorn>=0.29
 websockets>=12
 python-multipart>=0.0.9
 httpx>=0.27
+zeroconf>=0.38   # mDNS discovery of players (optional at runtime)
 # GStreamer bindings (python3-gi) come from the OS packages, see deploy/install.sh

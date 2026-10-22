@@ -22,7 +22,7 @@ const SETTINGS_FORM = [
       ["crf", "Quality (CRF)", "number"], ["preset", "Speed preset", "select", ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium"]],
       ["threads", "Threads (0 = auto)", "number"]] },
   { section: "transition", title: "Transitions", fields: [["type", "Type", "select", ["fade", "cut"]], ["duration_ms", "Fade (ms)", "number"]] },
-  { section: "audio", title: "Audio", note: "Video soundtracks to HDMI/ALSA and into NDI.",
+  { section: "audio", title: "Audio", note: "Video soundtracks to HDMI and into NDI. With sink auto and ALSA device blank, sound goes out of the same HDMI port as the video. Set a device (e.g. hw:CARD=Headphones) to send it elsewhere.",
     fields: [["enabled", "Enabled", "check"], ["sink", "Sink", "select", ["auto", "alsa", "pulse", "none"]], ["device", "ALSA device", "text"]] },
   { section: "aes67", title: "AES67 audio output", note: "Sends the audio mix as an AES67 multicast stream, locked to PTP, for Q-SYS and other AES67 receivers. Needs Audio enabled. Blank multicast = 239.69.x.y from this unit's address.",
     fields: [["enabled", "Enabled", "check"], ["sap", "Announce (SAP)", "check"], ["multicast", "Multicast address", "text"], ["port", "Port", "number"],
@@ -51,6 +51,7 @@ function renderStatus() {
   const eng = st.engine || {};
   $("#st-ndi").textContent = eng.ndi || "—";
   $("#st-display").textContent = eng.display || "—";
+  $("#st-audio").textContent = eng.audio || "—";
   $("#st-display-warn").textContent = eng.display_warning ? "⚠ " + eng.display_warning : "";
   $("#st-display-warn").classList.toggle("hidden", !eng.display_warning);
   $("#st-decoder").textContent = eng.video_decoder ? eng.video_decoder + (/^(avdec|vp8dec|vp9dec|dav1d|openh264)/.test(eng.video_decoder) ? " (software)" : " (hardware)") : "—";
@@ -236,26 +237,44 @@ function editMedia(m) {
 }
 
 async function uploadFiles(files) {
-  for (const f of files) {
-    const bar = el("div", { class: "progress" }, el("div"));
-    const pct = el("span", { class: "mono" }, "0%");
-    const row = el("div", { class: "upload-row" }, el("span", {}, f.name), bar, pct);
-    $("#uploads").append(row);
+  // Several files upload at once; each gets its own entry in the activity overlay
+  await Promise.all(files.map(async f => {
     const fd = new FormData();
     fd.append("file", f);
     fd.append("category", $("#up-category").value);
     fd.append("expires", $("#up-expires").value);
     fd.append("scale_mode", $("#up-scale").value);
-    try {
-      await upload("/api/media", fd, p => { bar.firstChild.style.width = (p * 100) + "%"; pct.textContent = Math.round(p * 100) + "%"; });
-      pct.textContent = "✓";
-      setTimeout(() => row.remove(), 2500);
-    } catch (e) {
-      pct.textContent = "✗";
-      row.title = e.message;
-      toast(f.name + ": " + e.message, "err");
+    try { await uploadWithProgress("/api/media", fd, f); }
+    catch (e) { toast(f.name + ": " + e.message, "err"); }
+  }));
+}
+
+/* Conversions in the activity overlay, from each item's playback status */
+const convSeen = new Map();  // id -> last status shown
+function syncConversionJobs() {
+  const live = new Set();
+  for (const m of S.media) {
+    const pb = m.playback || {};
+    const key = "conv:" + m.id;
+    const t = pb.target;
+    const what = t ? (t.kind === "video" ? `H.264 ${t.width}×${t.height}@${t.fps}` : `${(t.format || "").toUpperCase()} ${t.width}×${t.height}`) : "";
+    if (pb.status === "queued") {
+      live.add(m.id);
+      jobs.set(key, { title: m.name, detail: "Waiting to convert" + (what ? " to " + what : "") + " · original plays meanwhile", pct: null });
+    } else if (pb.status === "converting") {
+      live.add(m.id);
+      const extra = [pb.speed ? pb.speed + "× speed" : "", pb.eta != null ? fmtDur(pb.eta) + " left" : ""].filter(Boolean).join(" · ");
+      jobs.set(key, { title: m.name, detail: `Converting to ${what}` + (extra ? " · " + extra : ""), pct: m.kind === "video" ? (pb.progress || 0) : null });
+    } else if (convSeen.has(m.id) && jobs.has(key)) {
+      if (pb.status === "ready") jobs.done(key, "Optimised: " + what);
+      else if (pb.status === "failed") jobs.fail(key, "Conversion failed: " + (pb.error || "unknown error"));
+      else jobs.done(key, "Playing the original");
     }
   }
+  for (const id of [...convSeen.keys()]) if (!live.has(id)) convSeen.delete(id);
+  for (const id of live) convSeen.set(id, true);
+  // items deleted while converting
+  for (const k of jobs.keys()) if (k.startsWith("conv:") && !S.media.find(m => "conv:" + m.id === k)) jobs.done(k, "Removed");
 }
 
 /* ---------------- cues ---------------- */
@@ -447,7 +466,7 @@ function renderApiDocs() {
 }
 
 /* ---------------- loading ---------------- */
-async function loadMedia() { S.media = await api("GET", "/api/media"); renderLibrary(); renderQuick(); renderLiveCues(); if (S.settings) renderDefault(); }
+async function loadMedia() { S.media = await api("GET", "/api/media"); renderLibrary(); renderQuick(); renderLiveCues(); if (S.settings) renderDefault(); syncConversionJobs(); }
 async function loadCues() { S.cues = await api("GET", "/api/cues"); renderLiveCues(); renderCues(); }
 async function loadSettings() { S.settings = await api("GET", "/api/settings"); S.defList = [...(S.settings.playback.default_playlist || [])]; }
 

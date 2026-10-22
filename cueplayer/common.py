@@ -7,6 +7,7 @@ import json
 import socket
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request, WebSocket
 
@@ -23,6 +24,29 @@ def no_cache_gui(app) -> None:
         if request.url.path == "/" or request.url.path.startswith("/static/"):
             response.headers["Cache-Control"] = "no-cache"
         return response
+
+
+def normalize_url(value: str, default_port: int = 8080) -> str:
+    """'10.0.0.21', 'led1.local', '10.0.0.21:9000' or a full URL -> 'http://host:port'."""
+    v = (value or "").strip().rstrip("/")
+    if not v:
+        return ""
+    if "://" not in v:
+        if v.count(":") > 1 and not v.startswith("["):
+            v = f"[{v}]"  # bare IPv6 address
+        v = "http://" + v
+    try:
+        u = urlsplit(v)
+        host, port = u.hostname or "", u.port
+    except ValueError:
+        return v
+    if not host:
+        return v
+    if ":" in host:  # IPv6 literal
+        host = f"[{host}]"
+    if port is None and u.scheme == "http":
+        port = default_port
+    return f"{u.scheme}://{host}" + (f":{port}" if port else "")
 
 
 def check_token(expected: str, provided: Optional[str]) -> bool:

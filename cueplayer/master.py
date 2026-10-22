@@ -26,7 +26,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .common import (VERSION, WEB_DIR, Broadcaster, no_cache_gui, as_bool, as_float, as_int, hostname,
+from .common import (VERSION, WEB_DIR, Broadcaster, no_cache_gui, as_bool, as_float, as_int, hostname, normalize_url,
                      make_auth, params, ws_authorised)
 from .config import Settings
 from .library import CATEGORIES, Library, _atomic_write
@@ -53,6 +53,7 @@ class Fleet:
         self.listeners: List[Any] = []
         self.client: Optional[httpx.AsyncClient] = None
         self.sync_jobs: Dict[str, Dict[str, Any]] = {}
+        self.discovery = None  # discovery.Discovery, set at startup
 
     @staticmethod
     def _load(p: Path) -> Dict[str, Any]:
@@ -85,9 +86,7 @@ class Fleet:
             if k in d and d[k] is not None:
                 s[k] = str(d[k]).strip()
         if "url" in s:
-            s["url"] = s["url"].rstrip("/")
-            if s["url"] and not s["url"].startswith(("http://", "https://")):
-                s["url"] = "http://" + s["url"]
+            s["url"] = normalize_url(s["url"])  # a bare IP or hostname is enough
         if "groups" in d and d["groups"] is not None:
             g = d["groups"]
             if isinstance(g, str):
@@ -105,7 +104,12 @@ class Fleet:
         if not d.get("url"):
             raise HTTPException(400, "url is required (e.g. http://10.0.0.21:8080)")
         sid = uuid.uuid4().hex[:8]
+        given = str(d.get("name") or "").strip()
         s = self._clean_screen(d)
+        # Added by address only: take the player's own name once it answers
+        if not given or normalize_url(given) == s.get("url"):
+            s["name"] = given or sid
+            s["auto_name"] = True
         s.setdefault("name", sid)
         s["id"] = sid
         self.screens[sid] = s
@@ -114,7 +118,7 @@ class Fleet:
 
     def register(self, d: Dict[str, Any], client_ip: str) -> Dict[str, Any]:
         """Self-registration from a player's heartbeat."""
-        url = (d.get("url") or "").rstrip("/") or f"http://{client_ip}:{int(d.get('port') or 8080)}"
+        url = normalize_url(d.get("url") or "") or f"http://{client_ip}:{int(d.get('port') or 8080)}"
         name = str(d.get("name") or client_ip)
         existing = next((s for s in self.screens.values()
                          if s.get("url") == url or (s.get("name") == name and s.get("auto"))), None)
@@ -262,6 +266,12 @@ class Fleet:
                 if not live.get("info") or time.time() - live.get("info_t", 0) > 60:
                     live["info"] = await self.call(s, "GET", "/api/info", timeout=3)
                     live["info_t"] = time.time()
+                    if s.get("auto_name") and live["info"].get("name"):
+                        s["name"] = live["info"]["name"]
+                        s.pop("auto_name", None)
+                        if not s.get("groups") and live["info"].get("groups"):
+                            s["groups"] = self._clean_screen({"groups": live["info"]["groups"]})["groups"]
+                        self.save()
             except Exception as e:
                 live.update(online=False, error=str(e) or type(e).__name__)
             now = (live.get("online"), (live.get("status") or {}).get("clip"),
@@ -418,6 +428,21 @@ def create_master_app(fleet: Fleet) -> FastAPI:
         if not data:
             return Response(status_code=204)
         return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/discovered", dependencies=[api])
+    def discovered():
+        """Players announcing themselves on the local network (mDNS), and whether each is
+        already on the Screens list."""
+        disc = fleet.discovery
+        known = {normalize_url(s.get("url", "")) for s in fleet.screens.values()}
+        known_hosts = {normalize_url(s.get("url", "")).split("//")[-1].rsplit(":", 1)[0]
+                       for s in fleet.screens.values()}
+        out = []
+        for p in (disc.players() if disc else []):
+            added = p["url"] in known or any(a in known_hosts for a in p["addresses"]) \
+                or (p.get("host") or "") in known_hosts
+            out.append(dict(p, added=added))
+        return {"players": out, "available": bool(disc and disc._zc), "error": disc.error if disc else None}
 
     @app.get("/api/groups", dependencies=[api])
     def groups():

@@ -50,7 +50,7 @@ DEFAULTS: Dict[str, Any] = {
     "audio": {
         "enabled": False,
         "sink": "auto",   # auto | alsa | pulse | none
-        "device": "",     # alsa device, e.g. hw:0,0 (HDMI)
+        "device": "",     # alsa device; blank = the HDMI port the video is on (Pi: hdmi:CARD=vc4hdmiN)
     },
     "aes67": {
         # Native AES67 / SMPTE 2110-30 audio output (RTP multicast, PTP-locked). Needs audio

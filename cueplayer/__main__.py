@@ -9,7 +9,7 @@ from pathlib import Path
 
 import uvicorn
 
-from .common import VERSION, hostname
+from .common import VERSION, hostname, normalize_url
 from .config import Settings
 from .library import Library
 from .tcp_control import LineServer
@@ -26,10 +26,8 @@ async def fleet_heartbeat(settings: Settings) -> None:
         while True:
             fleet, control = settings.section("fleet"), settings.section("control")
             sent = (fleet, control)
-            url = (fleet.get("master_url") or "").rstrip("/")
+            url = normalize_url(fleet.get("master_url") or "")  # bare IP/hostname is fine
             if url:
-                if not url.startswith(("http://", "https://")):
-                    url = "http://" + url
                 headers = {"Authorization": f"Bearer {fleet['master_token']}"} \
                     if fleet.get("master_token") else {}
                 body = {"name": fleet.get("screen_name") or hostname(),
@@ -56,6 +54,14 @@ async def fleet_heartbeat(settings: Settings) -> None:
                     break
 
 
+async def mdns_refresh(disc) -> None:
+    """Re-advertise when the screen name, groups or network addresses change."""
+    loop = asyncio.get_running_loop()
+    while True:
+        await asyncio.sleep(15)
+        await loop.run_in_executor(None, disc.refresh)
+
+
 async def run(args) -> None:
     data = Path(args.data).expanduser()
     data.mkdir(parents=True, exist_ok=True)
@@ -66,11 +72,24 @@ async def run(args) -> None:
     tcp_port = control.get("tcp_port", 7700) if args.tcp_port is None else args.tcp_port
     udp_port = control.get("udp_port", 7701) if args.udp_port is None else args.udp_port
     get_token = lambda: settings.section("control").get("api_token", "")  # noqa: E731
+    loop = asyncio.get_running_loop()
+
+    from .discovery import Discovery
+
+    def unit_info():
+        fleet = settings.section("fleet")
+        return {"name": (fleet.get("screen_name") if args.role == "player" else "") or hostname(),
+                "port": http_port,
+                "groups": (fleet.get("groups") or []) if args.role == "player" else [],
+                "version": VERSION}
 
     if args.role == "master":
         from .master import Fleet, create_master_app, master_event_line, master_handler
 
         fleet = Fleet(data, settings, library)
+        disc = Discovery("master", unit_info, browse=True,
+                         on_change=lambda: loop.call_soon_threadsafe(fleet.notify, {"event": "discovered"}))
+        fleet.discovery = disc
         app = create_master_app(fleet)
         lines = LineServer(master_handler(fleet), get_token, fleet.subscribe, master_event_line)
         on_stop = lambda: None  # noqa: E731
@@ -84,7 +103,12 @@ async def run(args) -> None:
         app = create_player_app(ctrl)
         lines = LineServer(player_handler(ctrl), get_token, ctrl.subscribe, player_event_line)
         asyncio.create_task(fleet_heartbeat(settings))
+        disc = Discovery("player", unit_info)
         on_stop = ctrl.shutdown
+
+    if not args.no_mdns:
+        loop.run_in_executor(None, disc.start)
+        asyncio.create_task(mdns_refresh(disc))
 
     await lines.start(args.host, tcp_port, udp_port)
     # Don't wait on open GUI websockets at shutdown (systemctl restart would otherwise hang)
@@ -97,6 +121,7 @@ async def run(args) -> None:
         await server.serve()
     finally:
         on_stop()
+        disc.stop()
 
 
 def main() -> None:
@@ -111,6 +136,8 @@ def main() -> None:
     p.add_argument("--tcp-port", type=int, default=None)
     p.add_argument("--udp-port", type=int, default=None)
     p.add_argument("--mock", action="store_true", help="use the mock engine (no GStreamer)")
+    p.add_argument("--no-mdns", action="store_true", default=os.environ.get("CUEPLAYER_MDNS") == "0",
+                   help="don't advertise or discover units on the local network")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,

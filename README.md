@@ -89,7 +89,13 @@ git clone https://github.com/mykeman/Event-Messaging.git && cd Event-Messaging
 sudo ./deploy/install.sh --role master
 ```
 
-Then on each player, open **Settings → Master server** and set the *Master URL* (e.g. `http://10.10.20.5:8080`), plus the *Master token* if the master has one. The player registers itself and appears on the master's **Screens** tab. You can also add screens by hand on the master.
+Then add players. Any of these works:
+
+- **Found on the network:** players announce themselves over mDNS (Bonjour). They are listed under *Found on the network* on the master's **Screens** tab; click **Add**. This needs the master and players on the same network segment, because mDNS doesn't cross routers.
+- **By address:** type a player's IP address or hostname (`10.10.20.31` or `led1.local`) into the box on the Screens tab. There's no need for `http://` or the port. The screen takes the player's own name and groups once it answers.
+- **From the player:** in the player's **Settings → Master server**, set *Master URL* to the master's IP address or hostname, plus the *Master token* if the master has one. The player registers itself.
+
+Run with `--no-mdns` (or `CUEPLAYER_MDNS=0`) to turn off announcing and discovery.
 
 ### Updating an installed unit
 
@@ -250,6 +256,10 @@ A player can send its audio mix (video soundtracks) straight to Q-SYS as an AES6
 
 ---
 
+## Upload and conversion progress
+
+While anything is uploading, converting or being sent to screens, an **Activity** panel appears in the bottom-left corner of the web GUI on every tab. Each upload shows its progress, then *Processing on the unit…* while the player checks the file. Each conversion shows its target format, a progress bar, its speed (for example 1.4× real time) and the time left. On the master, each screen being sent media shows the file count. The panel can be collapsed, and it clears itself when the work is done.
+
 ## Media conversion
 
 Every player checks what it is running on (Raspberry Pi 4 or 5, x86 with Intel/AMD/NVIDIA decoding, and so on) and which codecs it can decode in hardware. It then checks each file against that and the canvas. A file gets an optimised **H.264 playback copy** (8-bit 4:2:0 MP4, at the canvas size and frame rate) when it:
@@ -287,6 +297,10 @@ A single always-running GStreamer pipeline renders the canvas. A live background
 ```
 
 Back up this directory to back up a unit.
+
+## Audio
+
+Turn on **Settings → Audio**; it is off by default. With *Sink* on `auto` and *ALSA device* left blank, a Raspberry Pi sends sound out of the **same HDMI port as the video** (`hdmi:CARD=vc4hdmi0` or `vc4hdmi1`). Without this, ALSA's default is the first HDMI port or the headphone jack. To use a different output, set *ALSA device*, for example `hw:CARD=Headphones` for the headphone jack, or a USB or Dante AVIO adapter. List the devices with `aplay -L`. The Live tab's *Audio* status shows which device is in use.
 
 ## Status / known limitations
 

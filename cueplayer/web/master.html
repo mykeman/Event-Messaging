@@ -43,6 +43,16 @@
       <div class="row"><button id="sync-all">Sync media to all</button><button class="primary" id="screen-add">Add screen</button></div>
     </div>
     <div class="screen-grid" id="screens"></div>
+    <div class="card" id="found-card" style="margin-top:16px">
+      <div class="row between"><h2>Found on the network</h2>
+        <form class="row" id="quick-add" autocomplete="off">
+          <input id="quick-add-ip" placeholder="IP or hostname, e.g. 10.0.0.21" style="min-width:240px">
+          <button class="primary">Add</button>
+        </form></div>
+      <p class="small muted" style="margin-top:0">Players on this network announce themselves automatically. Click <b>Add</b> to manage one from here,
+        or type its IP address or hostname above — no need for http:// or the port.</p>
+      <div class="grid" id="found" style="gap:8px"></div>
+    </div>
   </section>
 
   <!-- GLOBAL CUES -->

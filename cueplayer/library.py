@@ -193,7 +193,7 @@ class Library:
             pb = item.setdefault("playback", {})
             pb.update(fields)
             pb["updated"] = time.time()
-            if set(fields) - {"progress"}:  # progress ticks stay in memory only
+            if set(fields) - {"progress", "speed", "eta"}:  # progress ticks stay in memory only
                 self._save()
 
     def drop_playback_copy(self, item_id: str) -> None:

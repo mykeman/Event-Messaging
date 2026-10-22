@@ -166,3 +166,67 @@ function inputVal(e) {
   if (e.type === "number") return e.value === "" ? 0 : Number(e.value);
   return e.value;
 }
+
+/* Activity overlay: uploads, conversions and syncs with progress bars, on every tab.
+   jobs.set(key, {title, detail, pct}) - pct 0-100, or null for "working" (indeterminate)
+   jobs.done(key, text) / jobs.fail(key, text) - shown briefly, then removed */
+const jobs = (() => {
+  const items = new Map();
+  let box;
+  const panel = () => {
+    if (!box) {
+      box = el("div", { id: "jobs", class: "hidden" },
+        el("div", { class: "jobs-head" }, el("b", {}, "Activity"),
+          el("button", { class: "icon small", title: "Hide", onclick: () => box.classList.toggle("collapsed") }, "–")),
+        el("div", { class: "jobs-list" }));
+      document.body.append(box);
+    }
+    return box;
+  };
+  const render = () => {
+    const b = panel();
+    b.classList.toggle("hidden", items.size === 0);
+    b.querySelector(".jobs-head b").textContent = "Activity" + (items.size > 1 ? ` (${items.size})` : "");
+    b.querySelector(".jobs-list").replaceChildren(...[...items.values()].map(j =>
+      el("div", { class: "job " + (j.state || "") },
+        el("div", { class: "row between", style: { flexWrap: "nowrap" } },
+          el("span", { class: "job-title", title: j.title }, j.title),
+          el("span", { class: "mono small" }, j.state === "done" ? "✓" : j.state === "error" ? "✗" :
+            j.pct === null || j.pct === undefined ? "" : Math.round(j.pct) + "%")),
+        j.detail ? el("div", { class: "small muted job-detail", title: j.detail }, j.detail) : null,
+        j.state ? null : el("div", { class: "progress" + (j.pct === null || j.pct === undefined ? " indeterminate" : "") },
+          el("div", { style: { width: (j.pct || 0) + "%" } })))));
+  };
+  const finish = (key, state, text, ms) => {
+    const j = items.get(key);
+    if (!j) return;
+    Object.assign(j, { state, detail: text || j.detail });
+    render();
+    clearTimeout(j.timer);
+    j.timer = setTimeout(() => { if (items.get(key) === j) { items.delete(key); render(); } }, ms);
+  };
+  return {
+    set(key, j) { const old = items.get(key); if (old) clearTimeout(old.timer); items.set(key, Object.assign({}, j)); render(); },
+    done(key, text) { finish(key, "done", text, 3000); },
+    fail(key, text) { finish(key, "error", text, 10000); },
+    has(key) { return items.has(key); },
+    keys() { return [...items.keys()]; },
+  };
+})();
+
+/* Upload with an overlay entry; resolves with the created media item */
+async function uploadWithProgress(path, fd, file) {
+  const key = "up:" + file.name + ":" + file.size + ":" + Date.now();
+  jobs.set(key, { title: file.name, detail: `Uploading · ${fmtBytes(file.size)}`, pct: 0 });
+  try {
+    const item = await upload(path, fd, p => {
+      if (p < 1) jobs.set(key, { title: file.name, detail: `Uploading · ${fmtBytes(file.size * p)} of ${fmtBytes(file.size)}`, pct: p * 100 });
+      else jobs.set(key, { title: file.name, detail: "Processing on the unit…", pct: null });
+    });
+    jobs.done(key, "Uploaded");
+    return item;
+  } catch (e) {
+    jobs.fail(key, e.message);
+    throw e;
+  }
+}

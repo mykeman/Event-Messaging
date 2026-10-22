@@ -86,6 +86,37 @@ def detect_display_connector(drm: str = "/sys/class/drm") -> Optional[Tuple[int,
     return None
 
 
+def hdmi_alsa_device(port: Optional[str], cards: Optional[str] = None) -> Optional[str]:
+    """ALSA device for the HDMI port the video is on, e.g. HDMI-A-2 -> hdmi:CARD=vc4hdmi1,DEV=0.
+
+    On a Pi each HDMI port has its own sound card (vc4hdmi0, vc4hdmi1) and ALSA's default is
+    the first one (or the headphone jack), so audio otherwise goes to the wrong port. The
+    hdmi: device does the IEC958 framing these cards require."""
+    if not port:
+        return None
+    m = re.fullmatch(r"HDMI-A-(\d+)", port)
+    if not m:
+        return None
+    index = int(m.group(1)) - 1
+    if cards is None:
+        try:
+            cards = Path("/proc/asound/cards").read_text()
+        except OSError:
+            return None
+    ids = re.findall(r"^\s*\d+\s+\[(\S+)\s*\]", cards, re.M)
+    # Only the Pi's per-port vc4hdmiN cards map 1:1 to connectors; elsewhere (Intel/AMD
+    # HDA) HDMI outputs are devices on one card, so leave those to the system default.
+    card = next((c for c in ids if c.lower() == f"vc4hdmi{index}"), None)
+    return f"hdmi:CARD={card},DEV=0" if card else None
+
+
+def audio_server_running() -> bool:
+    """A PipeWire/PulseAudio server this process can use (desktop sessions)."""
+    run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return bool(os.environ.get("PULSE_SERVER")) or any(
+        Path(run, n).exists() for n in ("pulse/native", "pipewire-0"))
+
+
 def cadence_ok(fps: float, refresh: float) -> bool:
     """True when every frame is shown for the same number of refreshes (e.g. 25 or 50 fps
     on 50 Hz, 30 or 60 fps on 60 Hz). Otherwise motion judders even with no dropped frames."""
@@ -254,6 +285,8 @@ class GstEngine(BaseEngine):
         self._disabled_outputs: set = set()   # outputs switched off after repeated failures
         self._orig_ranks: Dict[str, int] = {}
         self._modeset_fallback = False  # keeping the boot mode failed: let kmssink set one
+        self._display_port: Optional[str] = None   # e.g. HDMI-A-2, for matching HDMI audio
+        self._audio_note = "on"
         self._fail_counts: Dict[str, int] = {}
         self._ptp_init: Optional[bool] = None   # gst_ptp_init() result (it can only run once)
         self._ptp_clocks: Dict[int, Any] = {}   # domain -> GstPtpClock
@@ -374,6 +407,7 @@ class GstEngine(BaseEngine):
         self._teardown()
         self.settings = settings
         self._apply_decoder_ranks(bool(settings["output"].get("hw_decode", True)))
+        self._display_port = None
         self.status.update(video_decoder=None, frames_rendered=0, frames_dropped=0)
         out, disp, ndi = settings["output"], settings["display"], settings["ndi"]
         audio, prev = settings["audio"], settings["preview"]
@@ -425,7 +459,7 @@ class GstEngine(BaseEngine):
         if audio.get("enabled"):
             try:
                 atee = self._build_audio(audio, low_latency=bool(aes.get("enabled")))
-                self.status["audio"] = "on"
+                self.status["audio"] = self._audio_note
             except Exception as e:
                 self.status["audio"] = f"error: {e}"
                 self._error(f"audio: {e}")
@@ -519,6 +553,7 @@ class GstEngine(BaseEngine):
                 if found:
                     sink.set_property("connector-id", found[0])
                     port_note = found[1]
+                    self._display_port = found[1]
             if keep:
                 refresh = boot[0][2] if boot else 0.0
                 mode_note = f"@{refresh:g}Hz (boot mode)" if refresh else "(current mode)"
@@ -586,17 +621,31 @@ class GstEngine(BaseEngine):
         self.pipeline.add(atee)
         self.amix.link(atee)
         kind = audio.get("sink", "auto")
+        self._audio_note = "on"
         if kind != "none":
+            device = audio.get("device") or ""
+            hdmi = hdmi_alsa_device(self._display_port)
+            if kind == "auto" and not audio_server_running() and (device or hdmi):
+                kind = "alsa"  # no desktop sound server: talk to ALSA directly
             if kind == "alsa":
                 sink = self._make("alsasink")
-                if audio.get("device"):
-                    sink.set_property("device", audio["device"])
+                device = device or hdmi or ""
+                if device:
+                    sink.set_property("device", device)
+                # Keep the system clock as the pipeline clock, same as without audio
+                sink.set_property("provide-clock", False)
+                self._audio_note = f"on (alsa {device or 'default'}" + (
+                    f", follows video on {self._display_port})" if device == hdmi and hdmi else ")")
             elif kind == "pulse":
                 sink = self._make("pulsesink")
+                self._audio_note = "on (pulse)"
             else:
                 sink = self._make("autoaudiosink")
+                self._audio_note = "on (auto)"
             self._branch(atee, self._make("queue", leaky=2), self._make("audioconvert"),
                          self._make("audioresample"), sink)
+        else:
+            self._audio_note = "on (no local output)"
         return atee
 
     def _build_ndi(self, tee, atee, ndi) -> None:
