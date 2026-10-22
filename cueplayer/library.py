@@ -196,6 +196,18 @@ class Library:
             if set(fields) - {"progress", "speed", "eta"}:  # progress ticks stay in memory only
                 self._save()
 
+    def set_decode(self, item_id: str, mode: Optional[str]) -> None:
+        """'software' after a hardware decoder failed on this file; None = automatic."""
+        with self._lock:
+            item = self.items.get(item_id)
+            if item is None:
+                return
+            if mode:
+                item["decode"] = mode
+            else:
+                item.pop("decode", None)
+            self._save()
+
     def drop_playback_copy(self, item_id: str) -> None:
         with self._lock:
             item = self.items.get(item_id)
@@ -214,6 +226,7 @@ class Library:
                 return
             size = (self.media_dir / name).stat().st_size
             pb = item.setdefault("playback", {})
+            item.pop("decode", None)  # new file: give the hardware decoder another go
             pb.update(status="ready", file=name, size=size, target=target, progress=100,
                       error=None, finished=time.time(), updated=time.time())
             if not keep_original and item["filename"] != name:
@@ -313,7 +326,7 @@ class Library:
         log.info("added %s (%s, %s)", item["name"], kind, category)
         return dict(item)
 
-    EDITABLE = ("name", "category", "expires", "tags", "scale_mode")
+    EDITABLE = ("name", "category", "expires", "tags", "scale_mode", "decode")
 
     def update(self, item_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
@@ -327,6 +340,12 @@ class Library:
                         continue
                     if k == "scale_mode" and v not in ("", "fit", "fill", "stretch", "none"):
                         continue
+                    if k == "decode":
+                        if v not in ("", "auto", "software"):
+                            continue
+                        if v in ("", "auto"):
+                            item.pop("decode", None)
+                            continue
                     item[k] = v or None if k in ("expires", "scale_mode") else v
             self._save()
             return dict(item)

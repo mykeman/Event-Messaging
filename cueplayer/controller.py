@@ -39,6 +39,8 @@ class Controller:
         self._default_idx = -1
         self.state: Dict[str, Any] = self._blank_state("starting")
         self.history: List[Dict[str, Any]] = []
+        self._failures: Dict[str, int] = {}   # media id -> consecutive playback failures
+        self._skip_once: Optional[str] = None
 
     # ---- lifecycle --------------------------------------------------------------
     async def start(self) -> None:
@@ -119,7 +121,8 @@ class Controller:
         fade = self._fade(transition_ms)
         scale = item.get("scale_mode") or self.settings.section("output")["scale_mode"]
         clip = self.engine.play(str(self.library.playable_path(item)), item["kind"], scale, fade,
-                                duration_hint=item.get("duration") or 0)
+                                duration_hint=item.get("duration") or 0,
+                                sw_decode=item.get("decode") == "software")
         if item["kind"] == "image" and not duration:
             # A lone looping/held image stays up until the next command;
             # otherwise images advance after the default image duration.
@@ -172,6 +175,9 @@ class Controller:
             self.state["mode"] = "default"
             self._notify()
             return st
+        if self._skip_once in ids and len(ids) > 1:
+            ids = [i for i in ids if i != self._skip_once]
+        self._skip_once = None
         if pb.get("default_shuffle") and len(ids) > 1:
             choices = [i for i in range(len(ids)) if i != self._default_idx]
             self._default_idx = random.choice(choices)
@@ -216,17 +222,12 @@ class Controller:
         elif t == "clip_error":
             log.warning("clip %s failed: %s", ev.get("clip"), ev.get("error"))
             if ev.get("clip") == self.state.get("clip"):
-                self._notify_error(ev.get("error", "playback error"))
-                if self.state.get("lock"):
-                    # Never drop an emergency message because a file hiccuped: retry it
-                    self.loop.call_later(2, self._replay_current)
-                elif self.state["mode"] == "default":
-                    self.loop.call_later(2, self._retry_default)
-                else:
-                    self.play_default()
+                self._clip_failed(ev)
         elif t == "engine_error":
             self._notify_error(ev.get("error", "engine error"))
         elif t == "clip_started":
+            if ev.get("clip") == self.state.get("clip") and self.state.get("media"):
+                self._failures.pop(self.state["media"]["id"], None)
             self._notify("started")
 
     def _replay_current(self, transition_ms: int = 0, duration: Optional[float] = None) -> None:
@@ -240,6 +241,40 @@ class Controller:
                       label=st.get("label"))
         except PlayError as e:
             log.warning("could not resume %s: %s", st["media"].get("name"), e)
+            self.play_default()
+
+    def _clip_failed(self, ev: Dict[str, Any]) -> None:
+        m = self.state.get("media") or {}
+        item = self.library.get(m.get("id", "")) or {}
+        name = m.get("name") or "file"
+        # Hardware decoders reject some streams: fall back to software for this file
+        if ev.get("hw_decoder") and item and item.get("decode") != "software":
+            self.library.set_decode(item["id"], "software")
+            self._notify_error(f"The hardware decoder couldn't play {name} - "
+                               f"retrying with software decoding")
+            self._replay_current()
+            return
+        fails = self._failures.get(m.get("id"), 0) + 1
+        self._failures[m.get("id")] = fails
+        if self.state.get("lock"):
+            # Never drop an emergency message because a file hiccuped: keep retrying
+            self._notify_error(f"{name} failed to play ({ev.get('error')}) - retrying")
+            self.loop.call_later(min(30, 2 * fails), self._replay_current)
+            return
+        if self.state["mode"] == "default" and fails < 2:
+            self._notify_error(f"{name} failed to play ({ev.get('error')}) - retrying")
+            self.loop.call_later(2, self._retry_default)
+            return
+        self._notify_error(f"{name} can't be played ({ev.get('error')}) - skipped. "
+                           f"Try Convert now or re-export the file.")
+        pb = self.settings.section("playback")
+        others = [i for i in pb.get("default_playlist") or [] if i != m.get("id") and self.library.get(i)]
+        if self.state["mode"] == "default" and not others:
+            self.black(0)  # nothing else to fall back to: don't loop on a broken file
+            self.state["mode"] = "default"
+            self._notify()
+        else:
+            self._skip_once = m.get("id")
             self.play_default()
 
     def _retry_default(self) -> None:

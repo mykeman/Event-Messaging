@@ -154,6 +154,7 @@ function mediaCard(m) {
       el("div", { class: "small muted" }, meta),
       (m.tags || []).includes("master") ? el("div", {}, el("span", { class: "chip" }, "managed by master")) : null,
       playbackLine(m),
+      m.decode === "software" ? el("div", { class: "small muted", title: "The hardware decoder couldn't play this file, so it is decoded in software. Edit → Try hardware decoding to switch back." }, "Decoded in software") : null,
       exp),
     el("div", { class: "actions" },
       el("button", { onclick: () => api("POST", "/api/play/" + m.id) }, "Play"),
@@ -218,6 +219,7 @@ function editMedia(m) {
       el("div", { class: "row" },
         el("button", { type: "button", onclick: async () => { await api("POST", `/api/media/${m.id}/convert`); toast("Conversion queued", "ok"); } },
           (m.playback || {}).status === "ready" ? "Re-convert" : "Convert now"),
+        m.decode === "software" ? el("button", { type: "button", onclick: async () => { await api("PATCH", `/api/media/${m.id}`, { decode: "auto" }); toast("Hardware decoding will be tried again", "ok"); } }, "Try hardware decoding") : null,
         (m.playback || {}).status === "ready" || ["queued", "converting"].includes((m.playback || {}).status) ?
           el("button", { type: "button", onclick: async () => { await api("DELETE", `/api/media/${m.id}/converted`); toast("Playing the original", "ok"); } }, "Use original") : null),
       el("div", { class: "row" },

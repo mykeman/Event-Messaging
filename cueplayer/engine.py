@@ -151,7 +151,8 @@ class BaseEngine:
     def stop(self) -> None: ...
 
     def play(self, path: str, kind: str, scale_mode: str, fade_ms: int,
-             duration_hint: float = 0) -> int:
+             duration_hint: float = 0, sw_decode: bool = False) -> int:
+        """sw_decode: don't use hardware decoders for this clip (after one failed on it)."""
         raise NotImplementedError
 
     def black(self, fade_ms: int) -> None: ...
@@ -205,11 +206,25 @@ class MockEngine(BaseEngine):
     def rebuild(self, settings):
         self.start(settings)
 
-    def play(self, path, kind, scale_mode, fade_ms, duration_hint=0):
+    def play(self, path, kind, scale_mode, fade_ms, duration_hint=0, sw_decode=False):
         cid = next(self._ids)
         for t in self._timers.values():
             t.cancel()
         self._timers.clear()
+        # Test hooks: files starting with these markers fail like a broken file, or like a
+        # hardware decoder rejecting the stream (plays fine in software)
+        try:
+            with open(path, "rb") as f:
+                head = f.read(16)
+        except OSError:
+            head = b""
+        if head.startswith(b"MOCK:BROKEN") or (head.startswith(b"MOCK:HWFAIL") and not sw_decode):
+            hw = head.startswith(b"MOCK:HWFAIL")
+            threading.Timer(0.05, lambda: self._emit(
+                type="clip_error", clip=cid, error="Internal data stream error.",
+                decoder="v4l2h264dec" if hw else "avdec_h264", hw_decoder=hw)).start()
+            return cid
+        self.status["video_decoder"] = "avdec_h264 (mock)" if sw_decode else "mock"
         threading.Timer(0.05, lambda: self._emit(type="clip_started", clip=cid)).start()
         if kind == "video":
             t = threading.Timer(duration_hint or 10.0,
@@ -260,6 +275,8 @@ class _Clip:
         self.started = False
         self.offset_set = False
         self.dying = False
+        self.decoder: Optional[str] = None
+        self.path = ""
         self.lock = threading.Lock()
 
 
@@ -284,6 +301,7 @@ class GstEngine(BaseEngine):
         self._restart_timer = None
         self._disabled_outputs: set = set()   # outputs switched off after repeated failures
         self._orig_ranks: Dict[str, int] = {}
+        self._element_clip: Dict[str, int] = {}  # element name -> clip id
         self._modeset_fallback = False  # keeping the boot mode failed: let kmssink set one
         self._display_port: Optional[str] = None   # e.g. HDMI-A-2, for matching HDMI audio
         self._audio_note = "on"
@@ -332,9 +350,9 @@ class GstEngine(BaseEngine):
     def stop(self):
         self._idle(self._teardown)
 
-    def play(self, path, kind, scale_mode, fade_ms, duration_hint=0):
+    def play(self, path, kind, scale_mode, fade_ms, duration_hint=0, sw_decode=False):
         cid = next(self._ids)
-        self._idle(self._play, cid, path, kind, scale_mode, fade_ms)
+        self._idle(self._play, cid, path, kind, scale_mode, fade_ms, sw_decode)
         return cid
 
     def black(self, fade_ms):
@@ -815,7 +833,7 @@ class GstEngine(BaseEngine):
             return 0
         return max(0, clock.get_time() - self.pipeline.get_base_time())
 
-    def _play(self, cid, path, kind, scale_mode, fade_ms) -> None:
+    def _play(self, cid, path, kind, scale_mode, fade_ms, sw_decode=False) -> None:
         if self.pipeline is None:
             self._emit(type="clip_error", clip=cid, error="pipeline not running")
             return
@@ -825,8 +843,15 @@ class GstEngine(BaseEngine):
 
         b = Gst.Bin.new(f"clip{cid}")
         clip = _Clip(cid, b, kind, scale_mode, fade_ms)
+        clip.path = path
         src = self._make("uridecodebin", uri=Path(path).absolute().as_uri())
+        if sw_decode:
+            # GST_AUTOPLUG_SELECT_SKIP (2) for hardware decoders, TRY (0) for the rest
+            hw = set(HW_DECODERS)
+            src.connect("autoplug-select",
+                        lambda _b, _p, _c, f: 2 if f.get_name() in hw else 0)
         b.add(src)
+        self._own(src.get_name(), cid)
 
         # video chain
         vconv = self._make("videoconvert")
@@ -881,8 +906,10 @@ class GstEngine(BaseEngine):
                 achain[0].get_static_pad("sink").send_event(Gst.Event.new_eos())
 
         def on_element(_bin, _sub, el):
+            self._own(el.get_name(), cid)
             f = el.get_factory()
             if f and "Decoder/Video" in (f.get_metadata("klass") or ""):
+                clip.decoder = f.get_name()
                 self.status["video_decoder"] = f.get_name()
 
         b.connect("deep-element-added", on_element)
@@ -1019,12 +1046,28 @@ class GstEngine(BaseEngine):
             log.exception("failed to release clip %s", clip.id)
 
     # ---- bus ------------------------------------------------------------------
+    def _own(self, name: str, cid: int) -> None:
+        """Remember which clip an element belongs to: once a clip is torn down its elements
+        have no parent, but their last error messages can still be on the bus."""
+        self._element_clip[name] = cid
+        while len(self._element_clip) > 4000:
+            self._element_clip.pop(next(iter(self._element_clip)))
+
     def _clip_for(self, obj) -> Optional[_Clip]:
+        top = obj
         while obj is not None:
             name = obj.get_name() if hasattr(obj, "get_name") else ""
             if name.startswith("clip") and name[4:].isdigit():
                 return self.clips.get(int(name[4:])) or _Clip(int(name[4:]), None, "", "", 0)
+            top = obj
             obj = obj.get_parent()
+        cid = self._element_clip.get(top.get_name() if hasattr(top, "get_name") else "")
+        if cid is not None:
+            return self.clips.get(cid) or _Clip(cid, None, "", "", 0)
+        if top is not None and top is not self.pipeline:
+            # Detached element that isn't part of the running pipeline: a clip already torn
+            # down. Never treat it as a pipeline failure (that would restart everything).
+            return _Clip(-1, None, "", "", 0)
         return None
 
     def _on_bus(self, _bus, msg) -> None:
@@ -1035,9 +1078,12 @@ class GstEngine(BaseEngine):
             if clip is not None:
                 if clip.bin is None or clip.dying:
                     return  # error from a clip being torn down
-                log.warning("clip %s error: %s", clip.id, err.message)
+                hw = clip.decoder in HW_DECODERS
+                log.warning("clip %s error: %s (decoder %s, %s) %s", clip.id, err.message,
+                            clip.decoder or "?", Path(clip.path).name, (dbg or "").replace("\n", " "))
                 self._release(clip)
-                self._emit(type="clip_error", clip=clip.id, error=err.message)
+                self._emit(type="clip_error", clip=clip.id, error=err.message,
+                           decoder=clip.decoder, hw_decoder=hw, detail=(dbg or "")[-300:])
                 return
             log.error("pipeline error: %s (%s)", err.message, dbg)
             self._error(f"{msg.src.get_name()}: {err.message}")

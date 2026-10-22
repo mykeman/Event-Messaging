@@ -168,6 +168,25 @@ def main():
         r = c.post("/api/cues/scenarios").json()
         check(r["added"] == [], "re-adding scenarios doesn't duplicate")
 
+        # --- decoder failures: software fallback, no endless retry loop ---
+        r = c.post("/api/media", files={"file": ("hw.mp4", b"MOCK:HWFAIL" + b"\0" * 100)}).json()
+        st = c.get(f"/api/play/{r['id']}", params={"after": "hold"}).json()
+        time.sleep(0.5)
+        st = c.get("/api/status").json()
+        check(st["media"]["id"] == r["id"] and st["mode"] == "adhoc"
+              and c.get(f"/api/media/{r['id']}").json().get("decode") == "software",
+              f"hardware decoder failure retried in software ({st['mode']})")
+        bad = c.post("/api/media", files={"file": ("broken.mp4", b"MOCK:BROKEN" + b"\0" * 100)}).json()
+        c.patch("/api/settings", json={"playback": {"default_playlist": [bad["id"]]}})
+        c.get("/api/normal")
+        time.sleep(3.5)
+        st = c.get("/api/status").json()
+        check(st["mode"] == "default" and st["media"] is None,
+              f"broken-only normal playlist goes black instead of looping ({st['mode']}, {st['media']})")
+        c.patch("/api/settings", json={"playback": {"default_playlist": [img["id"]]}})
+        c.delete(f"/api/media/{bad['id']}")
+        c.delete(f"/api/media/{r['id']}")
+
         # --- TCP ---
         out = tcp(["PING", "CUE 1", "STATUS", "PLAY \"Welcome Slide\" HOLD", "BLACK FADE=0",
                    "BOGUS", "CUE 107", "CUE 1", "NORMAL"])
