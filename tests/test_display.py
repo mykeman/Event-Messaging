@@ -79,9 +79,15 @@ with tempfile.TemporaryDirectory() as d:
                              (3, "HDMI 0", "Display"), (7, "HDMI 1", "HDMI 1"), (8, "HDMI 2", "HDMI 2")):
         pcm = card / f"pcm{dev}p"; pcm.mkdir()
         pcm.joinpath("info").write_text(f"card: 0\ndevice: {dev}\nsubdevice: 0\nstream: PLAYBACK\nid: {ident}\nname: {name}\n")
-    check("Intel: HDMI PCM of the screen with valid ELD", eld_alsa_device(d) == ("plughw:CARD=PCH,DEV=3", "Display"), eld_alsa_device(d))
+    check("Intel: HDMI PCM named after the screen", eld_alsa_device(d, lambda c: []) == ("plughw:CARD=PCH,DEV=3", "Display"),
+          eld_alsa_device(d, lambda c: []))
+    # Giada F106D kernel: the PCM keeps its "HDMI 0" name; the jack control says pcm=3 has the screen
+    card.joinpath("pcm3p", "info").write_text("card: 0\ndevice: 3\nsubdevice: 0\nstream: PLAYBACK\nid: HDMI 0\nname: HDMI 0\n")
+    check("Intel: falls back to HDMI/DP jack controls", eld_alsa_device(d, lambda c: [3] if c == "PCH" else []) ==
+          ("plughw:CARD=PCH,DEV=3", "Display"), eld_alsa_device(d, lambda c: [3]))
+    check("Intel: nothing matched -> None", eld_alsa_device(d, lambda c: []) is None)
     card.joinpath("eld#2.3").write_text("monitor_present\t\t0\neld_valid\t\t0\n")
-    check("Intel: no screen reporting audio -> None", eld_alsa_device(d) is None)
+    check("Intel: no screen reporting audio -> None", eld_alsa_device(d, lambda c: [3]) is None)
 
 # HDMI audio follows the video port on a Pi
 PI_CARDS = """ 0 [vc4hdmi0       ]: vc4-hdmi - vc4-hdmi-0

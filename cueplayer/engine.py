@@ -183,13 +183,39 @@ def display_accepts_audio(port: Optional[str], drm: str = "/sys/class/drm") -> O
     return None
 
 
-def eld_alsa_device(asound: str = "/proc/asound") -> Optional[Tuple[str, str]]:
+def hdmi_jack_devices(card: str) -> List[int]:
+    """PCM devices whose "HDMI/DP,pcm=N Jack" control reads on (a screen is connected),
+    from amixer. This is the kernel's own PCM-to-port mapping on Intel/AMD HDA cards."""
+    amixer = shutil.which("amixer")
+    if not amixer:
+        return []
+    try:
+        listing = subprocess.run([amixer, "-c", card, "controls"], capture_output=True,
+                                 text=True, timeout=5).stdout
+    except (subprocess.SubprocessError, OSError):
+        return []
+    on = []
+    for numid, dev in re.findall(r"numid=(\d+),iface=CARD,name='HDMI/DP,pcm=(\d+) Jack'", listing):
+        try:
+            val = subprocess.run([amixer, "-c", card, "cget", f"numid={numid}"], capture_output=True,
+                                 text=True, timeout=5).stdout
+        except (subprocess.SubprocessError, OSError):
+            continue
+        if re.search(r":\s*values=on", val):
+            on.append(int(dev))
+    return on
+
+
+def eld_alsa_device(asound: str = "/proc/asound",
+                    jacks: Optional[Callable[[str], List[int]]] = None) -> Optional[Tuple[str, str]]:
     """(ALSA device, screen name) for the HDMI/DP output whose screen reports audio support
     (ELD valid), on cards like Intel/AMD HDA where several HDMI PCMs share one card.
 
-    The kernel names a connected HDMI PCM after the screen ("HDMI 0" becomes "Display"),
-    so the ELD's monitor_name identifies the PCM device; plughw handles format conversion.
+    Some kernels name a connected HDMI PCM after the screen, which identifies it directly;
+    otherwise the "HDMI/DP,pcm=N Jack" controls say which PCM has the screen.
+    plughw handles format conversion.
     """
+    jacks = jacks or hdmi_jack_devices
     root = Path(asound)
     for card in sorted(root.glob("card[0-9]*")):
         names = []
@@ -207,6 +233,7 @@ def eld_alsa_device(asound: str = "/proc/asound") -> Optional[Tuple[str, str]]:
             card_id = card.joinpath("id").read_text().strip()
         except OSError:
             continue
+        screen = names[0] or "HDMI"
         for pcm in sorted(card.glob("pcm*p")):
             try:
                 info = pcm.joinpath("info").read_text()
@@ -214,8 +241,11 @@ def eld_alsa_device(asound: str = "/proc/asound") -> Optional[Tuple[str, str]]:
                 continue
             m = re.search(r"^name:\s*(.+)$", info, re.M)
             dev = re.search(r"^device:\s*(\d+)$", info, re.M)
-            if m and dev and m.group(1).strip() in names and names[0]:
+            if m and dev and names[0] and m.group(1).strip() in names:
                 return f"plughw:CARD={card_id},DEV={dev.group(1)}", m.group(1).strip()
+        devs = jacks(card_id)
+        if devs:
+            return f"plughw:CARD={card_id},DEV={devs[0]}", screen
     return None
 
 
