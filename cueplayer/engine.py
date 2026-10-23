@@ -1009,6 +1009,12 @@ class GstEngine(BaseEngine):
             freeze = self._make("imagefreeze")
             vchain += [freeze, self._caps(f"video/x-raw,framerate={fps}/1"),
                        self._make("videoconvert")]
+        # No QoS frame-dropping inside clips: the pad offset makes lateness reports from the
+        # compositor misleading, and a converter could then discard every frame (a test
+        # pattern froze after a second this way). The compositor handles late frames itself.
+        for el in vchain:
+            if el.find_property("qos"):
+                el.set_property("qos", False)
         vq = self._make("queue", max_size_buffers=4, max_size_bytes=0, max_size_time=0)
         vchain.append(vq)
         for el in vchain:
@@ -1032,7 +1038,7 @@ class GstEngine(BaseEngine):
             clip.aghost = Gst.GhostPad.new("asrc", achain[-1].get_static_pad("src"))
             b.add_pad(clip.aghost)
             if pattern:  # 1 kHz line-up tone at -20 dBFS
-                tsrc = self._make("audiotestsrc", wave=0, freq=1000.0, volume=0.1)
+                tsrc = self._make("audiotestsrc", wave=0, freq=1000.0, volume=0.1, is_live=True)
                 b.add(tsrc)
                 tsrc.link(achain[0])
 
@@ -1142,7 +1148,9 @@ class GstEngine(BaseEngine):
         """videotestsrc at the canvas size (+ optional text label) as the clip's source.
         Adds its elements to bin b and returns the last one."""
         nick = TEST_PATTERNS.get(name, TEST_PATTERNS["smpte"])[0]
-        src = self._make("videotestsrc")
+        # Live: frames are made in real time, like a camera, rather than as fast as the
+        # pipeline accepts them (which is how files behave)
+        src = self._make("videotestsrc", is_live=True)
         Gst.util_set_object_arg(src, "pattern", nick)
         cw, ch, fps = int(out["canvas_width"]), int(out["canvas_height"]), int(out["framerate"])
         els = [src, self._caps(f"video/x-raw,width={cw},height={ch},framerate={fps}/1")]
@@ -1296,6 +1304,8 @@ class GstEngine(BaseEngine):
         elif t == Gst.MessageType.QOS and msg.src.get_name() == "display_sink":
             _fmt, processed, dropped = msg.parse_qos_stats()
             self.status.update(frames_rendered=processed, frames_dropped=dropped)
+        elif t == Gst.MessageType.LATENCY and self.pipeline is not None:
+            self.pipeline.recalculate_latency()  # a live clip (test pattern) was added
         elif t == Gst.MessageType.WARNING:
             w, _ = msg.parse_warning()
             log.warning("gst warning from %s: %s", msg.src.get_name(), w.message)
