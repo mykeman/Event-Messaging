@@ -521,6 +521,7 @@ async function init() {
     if (msg.event === "cues") await loadCues();
     if (msg.event === "settings") { await loadSettings(); renderDefault(); }
     if (msg.event === "error") toast(msg.error, "err");
+    if (msg.event === "notice") toast(msg.message, "ok");
   }, on => {
     $("#conn-dot").classList.toggle("on", on);
     $("#conn-text").textContent = on ? "live" : "reconnecting";

@@ -143,6 +143,9 @@ The Settings tab shows a live diagram of the canvas inside the display raster. S
 
 ---
 
+
+**Connecting screens in the field.** A player doesn't need a screen at power-on. With no screen connected it runs without HDMI, and the Live tab shows *waiting for a screen to be connected*; NDI, the preview and control all keep working. The ports are checked every two seconds. When a screen is plugged in, unplugged and replugged, swapped, or moved to the other port, HDMI reconnects to it within a few seconds, and audio follows. All outputs blank for about a second while the video pipeline restarts, and the current item restarts from its beginning. If an LED processor needs a signal before it will report itself connected, use `install.sh --take-hdmi --hdmi-force` on the port it is plugged into, so that port is always driven.
+
 ## Q-SYS integration
 
 ### Q-SYS plugin (recommended)

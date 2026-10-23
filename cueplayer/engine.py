@@ -121,6 +121,35 @@ def hdmi_alsa_device(port: Optional[str], cards: Optional[str] = None) -> Option
     return f"hdmi:CARD={card},DEV=0" if card else None
 
 
+def connector_snapshot(drm: str = "/sys/class/drm") -> Dict[str, Tuple[str, int]]:
+    """{connector: (status, EDID size)} for every display connector - for hotplug checks."""
+    out: Dict[str, Tuple[str, int]] = {}
+    for path in Path(drm).glob("card*-*"):
+        try:
+            status = path.joinpath("status").read_text().strip()
+        except OSError:
+            continue
+        try:
+            size = path.joinpath("edid").stat().st_size
+        except OSError:
+            size = 0
+        out[re.sub(r"^card\d+-", "", path.name)] = (status, size)
+    return out
+
+
+def newly_connected(before: Dict[str, Tuple[str, int]], after: Dict[str, Tuple[str, int]]) -> List[str]:
+    """Connectors that gained a screen: became "connected", or their EDID appeared/changed
+    (a different screen). Unplugging alone needs no action."""
+    out = []
+    for name, (status, size) in after.items():
+        old = before.get(name, ("disconnected", 0))
+        if status == "connected" and old[0] != "connected":
+            out.append(name)
+        elif size and size != old[1]:
+            out.append(name)
+    return out
+
+
 def edid_has_audio(edid: bytes) -> Optional[bool]:
     """Whether a display's EDID says it accepts audio over HDMI (CEA-861 extension: the
     basic-audio flag or an audio data block). None if the EDID can't be read."""
@@ -379,6 +408,9 @@ class GstEngine(BaseEngine):
         self._frames: Dict[str, int] = {}        # buffers seen per stage (diagnostics)
         self._frames_prev: Dict[str, int] = {}
         self._rate_timer = None
+        self._hotplug_timer = None
+        self._hotplug_snap: Dict[str, Tuple[str, int]] = {}
+        self._hotplug_pending: Optional[Dict[str, Tuple[str, int]]] = None
         self._display_attempt = 0       # index into the display start-up strategies
         self._display_attempts = 1
         self._display_port: Optional[str] = None   # e.g. HDMI-A-2, for matching HDMI audio
@@ -479,6 +511,43 @@ class GstEngine(BaseEngine):
             if not a.link(b):
                 raise RuntimeError(f"failed to link {a.get_name()} -> {b.get_name()}")
 
+    # ---- HDMI hotplug ----------------------------------------------------------------
+    @staticmethod
+    def _uses_kms(disp: Dict[str, Any]) -> bool:
+        kind = disp.get("sink", "auto")
+        return kind == "kms" or (kind == "auto" and not os.environ.get("WAYLAND_DISPLAY")
+                                 and not os.environ.get("DISPLAY"))
+
+    def _waiting_for_screen(self, disp: Dict[str, Any]) -> bool:
+        """KMS output, connector auto, and the kernel reports connectors but none with a
+        screen. (No connector info at all, e.g. in a VM: try anyway.)"""
+        if not self._uses_kms(disp) or int(disp.get("connector_id") or 0) > 0:
+            return False
+        return bool(connector_snapshot()) and detect_display_connector() is None
+
+    def _hotplug_poll(self) -> bool:
+        """Every 2 s: when a screen is plugged in (or swapped), reconnect HDMI to it. A change
+        must be seen twice in a row first, so the EDID has been read."""
+        snap = connector_snapshot()
+        if snap != self._hotplug_snap:
+            if snap != self._hotplug_pending:
+                self._hotplug_pending = snap  # wait for it to settle
+                return True
+            gained = newly_connected(self._hotplug_snap, snap)
+            self._hotplug_snap, self._hotplug_pending = snap, None
+            disp = (self.settings or {}).get("display") or {}
+            if gained and disp.get("enabled") and self._uses_kms(disp) and self.pipeline is not None:
+                log.info("screen connected on %s - reconnecting HDMI", ", ".join(gained))
+                self._display_attempt = 0
+                self._fail_counts.pop("display", None)
+                self._disabled_outputs.discard("display")
+                self._disabled_outputs.discard("audio")  # audio follows the HDMI port
+                self._emit(type="notice", message=f"Screen connected on {gained[0]} - reconnecting HDMI")
+                self._safe_build(self.settings)
+        else:
+            self._hotplug_pending = None
+        return True
+
     # ---- diagnostics: frames per second at each stage -----------------------------
     def _count(self, pad, key: str) -> None:
         def probe(_pad, _info):
@@ -578,6 +647,10 @@ class GstEngine(BaseEngine):
         self.status["display"] = "disabled"
         if "display" in self._disabled_outputs:
             self.status["display"] = "disabled after repeated errors (save settings to retry)"
+        elif disp.get("enabled") and disp.get("sink") != "none" and self._waiting_for_screen(disp):
+            # Nothing to drive yet (e.g. powered on before the screen was connected): run
+            # without HDMI; the hotplug check rebuilds as soon as a screen appears.
+            self.status["display"] = "waiting for a screen to be connected"
         elif disp.get("enabled") and disp.get("sink") != "none":
             try:
                 self._build_display(tee, disp, cw, ch)
@@ -642,6 +715,9 @@ class GstEngine(BaseEngine):
         self.status.update(running=True, canvas=f"{cw}x{ch}@{fps}")
         if self._rate_timer is None:
             self._rate_timer = GLib.timeout_add_seconds(1, self._update_rates)
+        if self._hotplug_timer is None:
+            self._hotplug_snap = connector_snapshot()
+            self._hotplug_timer = GLib.timeout_add_seconds(2, self._hotplug_poll)
         log.info("pipeline started %s display=%s ndi=%s", self.status["canvas"],
                  self.status["display"], self.status["ndi"])
         self._emit(type="engine_started")

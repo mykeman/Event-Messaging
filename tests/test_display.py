@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from cueplayer.engine import boot_video_modes, cadence_ok, detect_display_connector, edid_has_audio, hdmi_alsa_device  # noqa: E402
+from cueplayer.engine import (boot_video_modes, cadence_ok, connector_snapshot, detect_display_connector,  # noqa: E402
+                              edid_has_audio, hdmi_alsa_device, newly_connected)
 import tempfile  # noqa: E402
 
 failures = 0
@@ -50,6 +51,20 @@ with tempfile.TemporaryDirectory() as d:  # Giada F106D: screen connected but no
 with tempfile.TemporaryDirectory() as d:
     fake_drm(d, [("card1-HDMI-A-1", "disconnected", b"", 32), ("card1-HDMI-A-2", "disconnected", b"", 42)])
     check("nothing connected -> None (kmssink chooses)", detect_display_connector(d) is None)
+
+# hotplug: what counts as "a screen was plugged in"
+with tempfile.TemporaryDirectory() as d:
+    fake_drm(d, [("card1-HDMI-A-1", "disconnected", b"", 32), ("card1-HDMI-A-2", "disconnected", b"", 42)])
+    before = connector_snapshot(d)
+    check("snapshot reads status and EDID size", before == {"HDMI-A-1": ("disconnected", 0), "HDMI-A-2": ("disconnected", 0)}, before)
+    Path(d, "card1-HDMI-A-2", "status").write_text("connected\n")
+    Path(d, "card1-HDMI-A-2", "edid").write_bytes(b"\x00" * 256)
+    after = connector_snapshot(d)
+    check("plugging a screen in is detected", newly_connected(before, after) == ["HDMI-A-2"], newly_connected(before, after))
+    check("unplugging needs no action", newly_connected(after, before) == [])
+    swapped = dict(after, **{"HDMI-A-2": ("connected", 384)})
+    check("a different screen (new EDID) is detected", newly_connected(after, swapped) == ["HDMI-A-2"])
+    check("no change -> nothing", newly_connected(after, after) == [])
 
 # HDMI audio follows the video port on a Pi
 PI_CARDS = """ 0 [vc4hdmi0       ]: vc4-hdmi - vc4-hdmi-0

@@ -247,6 +247,12 @@ class Controller:
             log.warning("clip %s failed: %s", ev.get("clip"), ev.get("error"))
             if ev.get("clip") == self.state.get("clip"):
                 self._clip_failed(ev)
+        elif t == "notice":
+            for fn in list(self.listeners):
+                try:
+                    fn({"event": "notice", "message": ev.get("message", ""), "status": self.status()})
+                except Exception:
+                    pass
         elif t == "engine_error":
             self._notify_error(ev.get("error", "engine error"))
         elif t == "clip_started":
