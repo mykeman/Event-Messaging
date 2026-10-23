@@ -307,6 +307,21 @@ TEST_PATTERNS: Dict[str, Tuple[str, str]] = {
 }
 
 
+TRANSITIONS = ("cut", "fade", "dip", "slide-left", "slide-right", "slide-up", "slide-down")
+
+YUV_FORMATS = {"NV12", "NV21", "I420", "YV12", "Y42B", "Y444", "NV16", "NV24"}
+
+
+def looks_blank_yuv(sample_byte: Callable[[int], int], size: int, fmt: str) -> bool:
+    """True for an all-zero YUV frame, which displays as solid green: what some hardware
+    decoders hand out before their first real picture. Samples 32 bytes spread across the
+    Y and chroma planes (a real picture is never 0 in all of them, even when black)."""
+    if fmt not in YUV_FORMATS or size < 256:
+        return False
+    step = size // 33
+    return all(sample_byte(i * step) == 0 for i in range(1, 33))
+
+
 def parse_colour(hex_colour: str) -> int:
     """'#rrggbb' -> 0xAARRGGBB as used by videotestsrc."""
     h = (hex_colour or "#000000").lstrip("#")
@@ -332,14 +347,14 @@ class BaseEngine:
     def stop(self) -> None: ...
 
     def play(self, path: str, kind: str, scale_mode: str, fade_ms: int,
-             duration_hint: float = 0, sw_decode: bool = False) -> int:
+             duration_hint: float = 0, sw_decode: bool = False, transition: str = "fade") -> int:
         """sw_decode: don't use hardware decoders for this clip (after one failed on it)."""
         raise NotImplementedError
 
     def black(self, fade_ms: int) -> None: ...
 
     def play_pattern(self, pattern: str, fade_ms: int, label: Optional[str] = None,
-                     tone: bool = False) -> int:
+                     tone: bool = False, transition: str = "fade") -> int:
         """Show a test pattern (TEST_PATTERNS key) on the whole canvas."""
         raise NotImplementedError
 
@@ -392,7 +407,8 @@ class MockEngine(BaseEngine):
     def rebuild(self, settings):
         self.start(settings)
 
-    def play(self, path, kind, scale_mode, fade_ms, duration_hint=0, sw_decode=False):
+    def play(self, path, kind, scale_mode, fade_ms, duration_hint=0, sw_decode=False,
+             transition="fade"):
         cid = next(self._ids)
         for t in self._timers.values():
             t.cancel()
@@ -424,7 +440,7 @@ class MockEngine(BaseEngine):
             t.cancel()
         self._timers.clear()
 
-    def play_pattern(self, pattern, fade_ms, label=None, tone=False):
+    def play_pattern(self, pattern, fade_ms, label=None, tone=False, transition="fade"):
         cid = next(self._ids)
         for t in self._timers.values():
             t.cancel()
@@ -471,11 +487,16 @@ class _Clip:
         self.dying = False
         self.decoder: Optional[str] = None
         self.path = ""
+        self.checked = 0          # frames checked for blank (green) output
+        self.blank_dropped = 0
+        self.transition = "fade"
+        self.geom = (0, 0, 0, 0)  # x, y, w, h on the canvas
         self.lock = threading.Lock()
 
 
 class GstEngine(BaseEngine):
     FADE_STEP_MS = 20
+    BLANK_CHECK_FRAMES = 120  # frame checks at the start of each clip (~2 s; each frame is checked twice)
 
     def __init__(self, on_event: EventCallback):
         super().__init__(on_event)
@@ -551,14 +572,17 @@ class GstEngine(BaseEngine):
     def stop(self):
         self._idle(self._teardown)
 
-    def play(self, path, kind, scale_mode, fade_ms, duration_hint=0, sw_decode=False):
+    def play(self, path, kind, scale_mode, fade_ms, duration_hint=0, sw_decode=False,
+             transition="fade"):
         cid = next(self._ids)
-        self._idle(self._play, cid, path, kind, scale_mode, fade_ms, sw_decode)
+        self._idle(self._play, cid, path, kind, scale_mode, fade_ms, sw_decode, None, False,
+                   transition)
         return cid
 
-    def play_pattern(self, pattern, fade_ms, label=None, tone=False):
+    def play_pattern(self, pattern, fade_ms, label=None, tone=False, transition="fade"):
         cid = next(self._ids)
-        self._idle(self._play, cid, pattern, "pattern", "stretch", fade_ms, False, label, tone)
+        self._idle(self._play, cid, pattern, "pattern", "stretch", fade_ms, False, label, tone,
+                   transition)
         return cid
 
     def black(self, fade_ms):
@@ -1184,7 +1208,7 @@ class GstEngine(BaseEngine):
         return max(0, clock.get_time() - self.pipeline.get_base_time())
 
     def _play(self, cid, path, kind, scale_mode, fade_ms, sw_decode=False,
-              label: Optional[str] = None, tone: bool = False) -> None:
+              label: Optional[str] = None, tone: bool = False, transition: str = "fade") -> None:
         if self.pipeline is None:
             self._emit(type="clip_error", clip=cid, error="pipeline not running")
             return
@@ -1196,6 +1220,7 @@ class GstEngine(BaseEngine):
         b = Gst.Bin.new(f"clip{cid}")
         clip = _Clip(cid, b, kind, scale_mode, fade_ms)
         clip.path = path
+        clip.transition = transition if transition in TRANSITIONS else "fade"
         if pattern:
             src = self._pattern_source(b, path, label, out)
         else:
@@ -1308,7 +1333,20 @@ class GstEngine(BaseEngine):
         vsrcpad = vq.get_static_pad("src")
 
         # Probes: first buffer -> set offset + geometry; EOS -> clip ended
+        def bad_frame(pad, buf) -> bool:
+            if buf.get_flags() & Gst.BufferFlags.CORRUPTED:
+                return True
+            if clip.checked >= self.BLANK_CHECK_FRAMES:
+                return False
+            clip.checked += 1
+            caps = pad.get_current_caps()
+            fmt = caps.get_structure(0).get_value("format") if caps and caps.get_size() else ""
+            return looks_blank_yuv(lambda off: buf.extract_dup(off, 1)[0], buf.get_size(), fmt or "")
+
         def first_buffer(pad, info):
+            if pad is vsrcpad and bad_frame(pad, info.get_buffer()):
+                clip.blank_dropped += 1
+                return Gst.PadProbeReturn.DROP  # keep waiting for a real picture
             with clip.lock:
                 if not clip.offset_set:
                     buf = info.get_buffer()
@@ -1331,6 +1369,7 @@ class GstEngine(BaseEngine):
                     sw, sh = s.get_value("width"), s.get_value("height")
                     x, y, w, h = fit_rect(sw, sh, int(out["canvas_width"]),
                                           int(out["canvas_height"]), clip.scale_mode)
+                    clip.geom = (x, y, w, h)
                     for k, v in (("xpos", x), ("ypos", y), ("width", w), ("height", h)):
                         clip.vpad.set_property(k, v)
                 GLib.idle_add(lambda: (self._clip_started(clip), False)[1])
@@ -1343,6 +1382,15 @@ class GstEngine(BaseEngine):
             return Gst.PadProbeReturn.OK
 
         vsrcpad.add_probe(Gst.PadProbeType.BUFFER, first_buffer)
+
+        def frame_filter(pad, info):
+            # Keeps dropping blank (green) or decoder-flagged corrupt frames after the start
+            if bad_frame(pad, info.get_buffer()):
+                clip.blank_dropped += 1
+                return Gst.PadProbeReturn.DROP
+            return Gst.PadProbeReturn.OK
+
+        vsrcpad.add_probe(Gst.PadProbeType.BUFFER, frame_filter)
         clip_pad = vsrcpad
 
         def clip_frames(_pad, _info):
@@ -1392,7 +1440,68 @@ class GstEngine(BaseEngine):
         stale = [c for c in self.clips.values() if c is not clip and c is not old]
         for c in stale:
             self._release(c)
-        self._fade(clip, old, clip.fade_ms)
+        self._transition(clip, old, clip.transition, clip.fade_ms)
+
+    def _transition(self, new: _Clip, old: Optional[_Clip], kind: str, ms: int) -> None:
+        """Animate from old to new. fade = crossfade; dip = old fades to black, then new fades
+        in; slide-* = new pushes old off the canvas in that direction; cut = instant."""
+        if kind == "cut" or ms <= 0 or old is None or old.dying:
+            if kind.startswith("slide") or kind == "dip":
+                kind = "fade" if old is None and ms > 0 else "cut"
+            self._fade(new, old, 0 if kind == "cut" else ms)
+            return
+        if kind == "fade":
+            self._fade(new, old, ms)
+            return
+        out = self.settings["output"]
+        cw, ch = int(out["canvas_width"]), int(out["canvas_height"])
+        vec = {"slide-left": (-1, 0), "slide-right": (1, 0),
+               "slide-up": (0, -1), "slide-down": (0, 1)}.get(kind, (0, 0))
+        steps = max(1, int(ms / self.FADE_STEP_MS))
+        state = {"i": 0}
+
+        def ease(p: float) -> float:  # smoothstep: gentle start and stop
+            return p * p * (3 - 2 * p)
+
+        def place(clip: _Clip, dx: float, dy: float) -> None:
+            x, y = clip.geom[0], clip.geom[1]
+            clip.vpad.set_property("xpos", int(round(x + dx)))
+            clip.vpad.set_property("ypos", int(round(y + dy)))
+
+        def tick():
+            state["i"] += 1
+            p = min(1.0, state["i"] / steps)
+            live_new = not new.dying
+            live_old = old is not None and not old.dying
+            if kind == "dip":
+                if live_old:
+                    old.vpad.set_property("alpha", max(0.0, 1.0 - 2 * p))
+                if live_new:
+                    new.vpad.set_property("alpha", max(0.0, 2 * p - 1.0))
+            else:  # slides
+                e = ease(p)
+                if live_new:
+                    new.vpad.set_property("alpha", 1.0)
+                    place(new, -vec[0] * (1 - e) * cw, -vec[1] * (1 - e) * ch)
+                if live_old:
+                    place(old, vec[0] * e * cw, vec[1] * e * ch)
+            if live_new and new.apad is not None:
+                new.apad.set_property("volume", p)
+            if live_old and old.apad is not None:
+                old.apad.set_property("volume", 1.0 - p)
+            if p >= 1.0:
+                if live_new:
+                    place(new, 0, 0)
+                    new.vpad.set_property("alpha", 1.0)
+                if old is not None:
+                    self._release(old)
+                return False
+            return True
+
+        if kind.startswith("slide") and not new.dying:
+            place(new, -vec[0] * cw, -vec[1] * ch)  # start fully off-canvas
+            new.vpad.set_property("alpha", 1.0)
+        GLib.timeout_add(self.FADE_STEP_MS, tick)
 
     def _fade(self, new: Optional[_Clip], old: Optional[_Clip], fade_ms: int) -> None:
         steps = max(1, int(fade_ms / self.FADE_STEP_MS))

@@ -26,7 +26,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .common import (VERSION, WEB_DIR, Broadcaster, no_cache_gui, as_bool, as_float, as_int, hostname, normalize_url,
+from .common import (VERSION, WEB_DIR, Broadcaster, no_cache_gui, as_bool, as_float, as_int, hostname, normalize_url, transition_params, TRANSITION_NAMES,
                      make_auth, params, ws_authorised)
 from .config import Settings
 from .library import CATEGORIES, Library, _atomic_write
@@ -219,7 +219,7 @@ class Fleet:
             raise HTTPException(404, f"global cue not found: {ref}")
         results = await asyncio.gather(*(
             self.command(a.get("target", "all"), a.get("action", "cue"), a.get("ref"),
-                         {k: a.get(k) for k in ("loop", "duration", "after", "transition_ms")})
+                         {k: a.get(k) for k in ("loop", "duration", "after", "transition_ms", "transition_type")})
             for a in cue.get("actions", [])), return_exceptions=True)
         out = []
         for a, r in zip(cue.get("actions", []), results):
@@ -244,6 +244,7 @@ class Fleet:
                 "duration": as_float(a.get("duration")),
                 "after": a.get("after") or None,
                 "transition_ms": as_int(a.get("transition_ms")),
+                "transition_type": a.get("transition_type") if a.get("transition_type") in TRANSITION_NAMES else None,
             })
         return {"label": str(d.get("label") or ""), "color": str(d.get("color") or ""),
                 "actions": actions}
@@ -459,9 +460,11 @@ def create_master_app(fleet: Fleet) -> FastAPI:
             o["duration"] = as_float(p["duration"])
         if p.get("after"):
             o["after"] = p["after"]
-        t = p.get("transition", p.get("transition_ms"))
-        if t not in (None, ""):
-            o["transition_ms"] = as_int(t)
+        kind, ms = transition_params(p)
+        if ms is not None:
+            o["transition_ms"] = ms
+        if kind:
+            o["transition_type"] = kind
         if "force" in p:
             o["force"] = as_bool(p["force"])
         for k in ("tone", "label"):  # test patterns

@@ -187,6 +187,19 @@ def main():
         c.delete(f"/api/media/{bad['id']}")
         c.delete(f"/api/media/{r['id']}")
 
+        # --- transitions ---
+        st = c.get("/api/play/gala loop", params={"transition": "dip", "after": "hold"})
+        check(st.status_code == 200, "play with transition=dip")
+        check(c.get("/api/play/gala loop", params={"transition": "wobble"}).status_code == 400, "unknown transition rejected")
+        r = c.put("/api/cues/5", json={"label": "Slide", "media": img["id"], "transition": "slide-left", "transition_ms": 800}).json()
+        check(r["transition"] == "slide-left" and r["transition_ms"] == 800, "cue stores its transition")
+        check(c.get("/api/cue/5").status_code == 200, "cue with slide transition plays")
+        c.delete("/api/cues/5")
+        c.patch("/api/settings", json={"transition": {"type": "slide-up", "duration_ms": 500}})
+        check(c.get("/api/settings").json()["transition"]["type"] == "slide-up", "default transition setting")
+        c.patch("/api/settings", json={"transition": {"type": "cut"}})
+        c.get("/api/normal")
+
         # --- test patterns ---
         pats = c.get("/api/test").json()
         check("smpte" in pats and "smpte-hd" in pats, "test pattern list")
@@ -201,6 +214,9 @@ def main():
         check(st["mode"] == "default", "TEST off returns to normal")
 
         # --- TCP ---
+        out = tcp(["CUE 1 TRANSITION=slide-right FADE=600", "CUE 1 CUT", "NORMAL"])
+        oks = [l for l in out if l.startswith("OK ")]
+        check(len(oks) == 3 and all(l.startswith("OK mode=cue") for l in oks[:2]), f"tcp transitions {oks}")
         out = tcp(["TEST checkers NOLABEL", "TEST OFF"])
         check(out[0].startswith("OK mode=test") and "kind=pattern" in out[0], f"tcp TEST pattern {out[:1]}")
         check(any(l.startswith("OK mode=default") for l in out[1:]), "tcp TEST OFF")

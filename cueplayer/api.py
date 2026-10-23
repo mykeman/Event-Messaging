@@ -12,7 +12,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .common import (VERSION, WEB_DIR, Broadcaster, no_cache_gui, as_bool, as_float, as_int, hostname,
+from .common import (VERSION, WEB_DIR, Broadcaster, transition_params, no_cache_gui, as_bool, as_float, as_int, hostname,
                      make_auth, params, ws_authorised)
 from .controller import Blocked, Controller, PlayError
 from .library import CATEGORIES, Library
@@ -85,7 +85,8 @@ def create_player_app(ctrl: Controller) -> FastAPI:
         return {"loop": as_bool(p.get("loop", False)),
                 "duration": as_float(p.get("duration")),
                 "after": str(p.get("after") or "default"),
-                "transition_ms": as_int(p.get("transition", p.get("transition_ms"))),
+                "transition_ms": transition_params(p)[1],
+                "transition_type": transition_params(p)[0],
                 "force": as_bool(p.get("force", False))}
 
     @app.api_route("/api/play", methods=["GET", "POST"], dependencies=[api])
@@ -102,7 +103,7 @@ def create_player_app(ctrl: Controller) -> FastAPI:
     @app.api_route("/api/cue/{ref}", methods=["GET", "POST"], dependencies=[api])
     async def cue(ref: str, p: Dict[str, Any] = Depends(params)):
         o = play_opts(p)
-        overrides = {k: o[k] for k in ("duration", "transition_ms") if o[k] is not None}
+        overrides = {k: o[k] for k in ("duration", "transition_ms", "transition_type") if o[k] is not None}
         overrides["force"] = o["force"]
         if "loop" in p:
             overrides["loop"] = o["loop"]

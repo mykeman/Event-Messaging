@@ -96,10 +96,19 @@ class Controller:
 
     # ---- commands --------------------------------------------------------------
     def _fade(self, override: Optional[int]) -> int:
+        """Fade time for going to black (any non-cut transition fades)."""
         if override is not None:
             return max(0, int(override))
         tr = self.settings.section("transition")
-        return int(tr.get("duration_ms", 0)) if tr.get("type") == "fade" else 0
+        return int(tr.get("duration_ms", 0)) if tr.get("type") != "cut" else 0
+
+    def _transition(self, kind: Optional[str], ms: Optional[int]):
+        """(type, ms) for the next change: explicit values win over the Settings default."""
+        from .engine import TRANSITIONS
+        tr = self.settings.section("transition")
+        kind = kind if kind in TRANSITIONS else (tr.get("type") if tr.get("type") in TRANSITIONS else "fade")
+        ms = max(0, int(ms)) if ms is not None else int(tr.get("duration_ms", 0))
+        return kind, (0 if kind == "cut" else ms)
 
     def _check_lock(self, lock: bool, force: bool) -> None:
         """Locked scenarios stay up until cleared with Normal/Black, or replaced by another
@@ -112,17 +121,17 @@ class Controller:
              after: str = "default", transition_ms: Optional[int] = None,
              mode: str = "adhoc", cue: Optional[str] = None,
              queue: Optional[List[str]] = None, lock: bool = False, force: bool = False,
-             label: Optional[str] = None) -> Dict[str, Any]:
+             label: Optional[str] = None, transition_type: Optional[str] = None) -> Dict[str, Any]:
         item = self.library.resolve(ref)
         if item is None:
             raise PlayError(f"media not found: {ref}")
         self._check_lock(lock, force)
         self._cancel_timer()
-        fade = self._fade(transition_ms)
+        tkind, fade = self._transition(transition_type, transition_ms)
         scale = item.get("scale_mode") or self.settings.section("output")["scale_mode"]
         clip = self.engine.play(str(self.library.playable_path(item)), item["kind"], scale, fade,
                                 duration_hint=item.get("duration") or 0,
-                                sw_decode=item.get("decode") == "software")
+                                sw_decode=item.get("decode") == "software", transition=tkind)
         if item["kind"] == "image" and not duration:
             # A lone looping/held image stays up until the next command;
             # otherwise images advance after the default image duration.
@@ -133,6 +142,7 @@ class Controller:
             "media": {k: item.get(k) for k in ("id", "name", "kind", "category", "duration")},
             "duration": duration or (item.get("duration") if item["kind"] == "video" else None),
             "loop": loop, "after": after, "transition_ms": transition_ms,
+            "transition_type": transition_type,
             "queue": list(queue or []), "lock": bool(lock), "label": label,
         }
         if duration:
@@ -152,6 +162,7 @@ class Controller:
             raise PlayError(f"cue {cue['number']} has no media")
         opts = {"loop": cue["loop"], "duration": cue["duration"], "after": cue["after"],
                 "transition_ms": cue["transition_ms"], "lock": cue.get("lock", False),
+                "transition_type": cue.get("transition"),
                 "label": cue.get("label") or None}
         opts.update({k: v for k, v in overrides.items() if v is not None})
         return self.play(items[0], mode="cue", cue=cue["number"], queue=items[1:], **opts)
@@ -171,7 +182,8 @@ class Controller:
         title = TEST_PATTERNS[pattern][1]
         text = (f"{name}  ·  {out['canvas_width']}×{out['canvas_height']} @ {out['framerate']} fps"
                 f"  ·  {title}") if label else None
-        clip = self.engine.play_pattern(pattern, self._fade(transition_ms), text, tone)
+        tkind, fade = self._transition(None, transition_ms)
+        clip = self.engine.play_pattern(pattern, fade, text, tone, transition=tkind)
         self.state = dict(self._blank_state("test"), clip=clip, started=time.time(), after="hold",
                           media={"id": f"pattern:{pattern}", "name": f"Test pattern: {title}",
                                  "kind": "pattern", "category": None, "duration": None},
@@ -346,6 +358,7 @@ class Controller:
                 queue.append(m["id"])
             self.play(nxt, loop=st["loop"], after=st["after"], mode=st["mode"], cue=st["cue"],
                       queue=queue, transition_ms=st["transition_ms"],
+                      transition_type=st.get("transition_type"),
                       duration=self._cue_duration(st), lock=st.get("lock", False), force=True,
                       label=st.get("label"))
             return

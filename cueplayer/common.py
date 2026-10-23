@@ -119,6 +119,23 @@ def as_int(v: Any) -> Optional[int]:
     return None if f is None else int(f)
 
 
+TRANSITION_NAMES = ("cut", "fade", "dip", "slide-left", "slide-right", "slide-up", "slide-down")
+
+
+def transition_params(p: Dict[str, Any]):
+    """(type, ms) from request params: transition=dip|800, transition_type=, transition_ms=."""
+    kind, ms = p.get("transition_type"), p.get("transition_ms")
+    t = p.get("transition")
+    if isinstance(t, str) and t.strip().lower() in TRANSITION_NAMES:
+        kind = t.strip().lower()
+    elif t not in (None, ""):
+        ms = t
+    kind = str(kind).lower() if kind not in (None, "") else None
+    if kind is not None and kind not in TRANSITION_NAMES:
+        raise HTTPException(400, f"transition must be one of {', '.join(TRANSITION_NAMES)}")
+    return kind, as_int(ms)
+
+
 def hostname() -> str:
     return socket.gethostname().split(".")[0]
 

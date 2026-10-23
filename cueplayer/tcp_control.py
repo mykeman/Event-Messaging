@@ -44,13 +44,20 @@ def parse_opts(tokens: List[str]) -> Dict[str, Any]:
             o["after"] = "hold"
         elif u == "FORCE":
             o["force"] = True
+        elif u == "CUT":
+            o["transition_type"] = "cut"
         elif "=" in t:
             k, v = t.split("=", 1)
             k = k.lower()
             if k in ("dur", "duration"):
                 o["duration"] = float(v)
-            elif k in ("fade", "transition", "transition_ms"):
+            elif k in ("fade", "transition_ms"):
                 o["transition_ms"] = int(float(v))
+            elif k == "transition":
+                if v.lower() in ("cut", "fade", "dip", "slide-left", "slide-right", "slide-up", "slide-down"):
+                    o["transition_type"] = v.lower()
+                else:
+                    o["transition_ms"] = int(float(v))
             elif k == "after":
                 o["after"] = v.lower() if not v.lower().startswith("cue:") else "cue:" + v[4:]
             elif k == "loop":

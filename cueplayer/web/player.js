@@ -21,7 +21,8 @@ const SETTINGS_FORM = [
     fields: [["mode", "Mode", "select", ["auto", "always", "off"]], ["keep_original", "Keep originals", "check"],
       ["crf", "Quality (CRF)", "number"], ["preset", "Speed preset", "select", ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium"]],
       ["threads", "Threads (0 = auto)", "number"]] },
-  { section: "transition", title: "Transitions", fields: [["type", "Type", "select", ["fade", "cut"]], ["duration_ms", "Fade (ms)", "number"]] },
+  { section: "transition", title: "Transitions", note: "Default between items: cut, crossfade (fade), dip to black, or slide (the new item pushes the old one off). Cues can override it.",
+    fields: [["type", "Type", "select", ["cut", "fade", "dip", "slide-left", "slide-right", "slide-up", "slide-down"]], ["duration_ms", "Duration (ms)", "number"]] },
   { section: "audio", title: "Audio", note: "Video soundtracks to HDMI and into NDI. With sink auto and ALSA device blank, sound goes out of the same HDMI port as the video. Set a device (e.g. hw:CARD=Headphones) to send it elsewhere.",
     fields: [["enabled", "Enabled", "check"], ["sink", "Sink", "select", ["auto", "alsa", "pulse", "none"]], ["device", "ALSA device", "text"]] },
   { section: "aes67", title: "AES67 audio output", note: "Sends the audio mix as an AES67 multicast stream, locked to PTP, for Q-SYS and other AES67 receivers. Needs Audio enabled. Blank multicast = 239.69.x.y from this unit's address.",
@@ -311,6 +312,12 @@ function cueRow(num, c, isNew) {
     el("td", {}, el("input", { type: "checkbox", class: "cue-lock", checked: !!c.lock })),
     el("td", {}, el("input", { type: "checkbox", class: "cue-loop", checked: !!c.loop })),
     el("td", {}, el("input", { type: "number", class: "cue-dur", min: 0, step: "0.1", value: c.duration || "", placeholder: "auto" })),
+    el("td", {}, el("div", { class: "row", style: { flexWrap: "nowrap", gap: "4px" } },
+      el("select", { class: "cue-tr", title: "Transition into this cue" },
+        el("option", { value: "", selected: !c.transition }, "Default"),
+        ...[["cut", "Cut"], ["fade", "Fade"], ["dip", "Dip to black"], ["slide-left", "Slide ←"], ["slide-right", "Slide →"],
+            ["slide-up", "Slide ↑"], ["slide-down", "Slide ↓"]].map(([v, l]) => el("option", { value: v, selected: c.transition === v }, l))),
+      el("input", { type: "number", class: "cue-trms", min: 0, step: 50, value: c.transition_ms ?? "", placeholder: "ms", title: "Duration (ms); blank = default", style: { width: "64px" } }))),
     el("td", {}, afterSel),
     el("td", {}, el("input", { type: "color", class: "cue-color", value: c.color || "#2a2f3a" })),
     el("td", {}, el("div", { class: "row", style: { flexWrap: "nowrap" } },
@@ -330,7 +337,8 @@ async function saveCue(tr) {
     label: $(".cue-label", tr).value, media: media.length > 1 ? media : (media[0] || null),
     loop: $(".cue-loop", tr).checked, duration: $(".cue-dur", tr).value || null,
     after: $(".cue-after", tr).value, color: color === "#2a2f3a" ? "" : color,
-    group: $(".cue-group", tr).value, lock: $(".cue-lock", tr).checked });
+    group: $(".cue-group", tr).value, lock: $(".cue-lock", tr).checked,
+    transition: $(".cue-tr", tr).value || null, transition_ms: $(".cue-trms", tr).value === "" ? null : Number($(".cue-trms", tr).value) });
   toast("Cue " + num + " saved", "ok");
 }
 

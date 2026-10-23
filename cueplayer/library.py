@@ -425,6 +425,8 @@ class Library:
             "transition_ms": int(tr) if tr not in (None, "") else None,
             "color": str(data.get("color") or ""),
             "group": data.get("group") if data.get("group") in CUE_GROUPS else "event",
+            "transition": data.get("transition") if data.get("transition") in (
+                "cut", "fade", "dip", "slide-left", "slide-right", "slide-up", "slide-down") else None,
             "lock": bool(data.get("lock", False)),
         }
 

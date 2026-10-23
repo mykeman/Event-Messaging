@@ -301,6 +301,19 @@ A single always-running GStreamer pipeline renders the canvas. A live background
 
 Back up this directory to back up a unit.
 
+## Transitions
+
+**Settings → Transitions** sets the default change between items:
+
+- **cut**
+- **fade**: crossfade
+- **dip**: dip to black, where the old item fades out and then the new one fades in
+- **slide-left / right / up / down**: the new item pushes the old one off the canvas
+
+Each has a duration in milliseconds. Any cue can override the type and duration in its *Transition* column. A command can override them too: `GET /api/cue/3?transition=dip&transition_ms=800`, or over TCP, `CUE 3 TRANSITION=slide-left FADE=600` or `CUE 3 CUT`. Audio crossfades with every type except cut.
+
+A new item only appears once its first real picture is decoded. Some hardware decoders hand out a few empty frames at the start of a stream, which show as solid green. The player discards those, and any frame the decoder flags as damaged, so they never reach the screen.
+
 ## Test patterns
 
 The Live tab has a **Test pattern** picker. The patterns are:
