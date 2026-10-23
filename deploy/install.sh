@@ -18,6 +18,11 @@
 #
 # Re-running upgrades the app in place; media and settings in /var/lib/cueplayer are kept.
 set -euo pipefail
+if [[ "$(uname -s)" != Linux ]] || ! command -v apt-get >/dev/null 2>&1; then
+  echo "This runs on the player or master itself (Debian, Ubuntu or Raspberry Pi OS),"
+  echo "not on $(uname -s). Connect to it first, e.g.  ssh admin@<unit-ip>  then run it there."
+  exit 1
+fi
 
 ROLE=player
 WITH_NDI=0

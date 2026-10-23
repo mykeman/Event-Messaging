@@ -7,6 +7,11 @@
 # Use --no-pull to install the working copy as-is (e.g. after copying files over).
 # For OS package changes or new install options, re-run deploy/install.sh instead.
 set -euo pipefail
+if [[ "$(uname -s)" != Linux ]] || ! command -v apt-get >/dev/null 2>&1; then
+  echo "This runs on the player or master itself (Debian, Ubuntu or Raspberry Pi OS),"
+  echo "not on $(uname -s). Connect to it first, e.g.  ssh admin@<unit-ip>  then run it there."
+  exit 1
+fi
 
 PULL=1
 PREFIX=/opt/cueplayer

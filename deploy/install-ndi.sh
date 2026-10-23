@@ -8,6 +8,11 @@
 # Building the plugin takes ~5 min on x86 and ~20-40 min on a Raspberry Pi 4/5.
 # Env overrides: NDI_SDK_URL, GST_RS_REF (gst-plugins-rs git tag/branch).
 set -euo pipefail
+if [[ "$(uname -s)" != Linux ]] || ! command -v apt-get >/dev/null 2>&1; then
+  echo "This runs on the player or master itself (Debian, Ubuntu or Raspberry Pi OS),"
+  echo "not on $(uname -s). Connect to it first, e.g.  ssh admin@<unit-ip>  then run it there."
+  exit 1
+fi
 [[ $EUID -eq 0 ]] || { echo "run with sudo"; exit 1; }
 
 NDI_SDK_URL=${NDI_SDK_URL:-https://downloads.ndi.tv/SDK/NDI_SDK_Linux/Install_NDI_SDK_v6_Linux.tar.gz}
