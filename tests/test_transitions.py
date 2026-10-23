@@ -81,11 +81,22 @@ _, _, _, faded = run("slide-left", old=False)
 check("nothing on screen before: slide becomes a fade in", faded and faded[0][2] == 400)
 
 # blank (green) frame detection
-zero = bytes(1920 * 1080 * 3 // 2)
-black = bytes([16]) * (1920 * 1080) + bytes([128]) * (1920 * 1080 // 2)
-check("all-zero NV12 frame is blank", eng.looks_blank_yuv(lambda o: zero[o], len(zero), "NV12"))
-check("real black NV12 frame is not blank", not eng.looks_blank_yuv(lambda o: black[o], len(black), "NV12"))
-check("RGB zero frame (black, not green) is ignored", not eng.looks_blank_yuv(lambda o: zero[o], len(zero), "BGRx"))
+W, H = 1920, 1080
+zero = bytes(W * H * 3 // 2)
+black = bytes([16]) * (W * H) + bytes([128]) * (W * H // 2)
+partial = bytes([90]) * (W * H) + bytes(W * H // 2)            # luma decoded, chroma still zero
+green_gfx = bytes([173]) * (W * H) + bytes([42, 26]) * (W * H // 4)  # pure #00FF00 graphic (BT.709)
+
+
+def rd(buf):
+    return lambda off, n: buf[off:off + n]
+
+
+check("all-zero NV12 frame is blank", eng.looks_blank_yuv(rd(zero), len(zero), "NV12"))
+check("partly decoded frame (chroma zero) is caught", eng.looks_blank_yuv(rd(partial), len(partial), "NV12"))
+check("real black frame passes", not eng.looks_blank_yuv(rd(black), len(black), "NV12"))
+check("pure green graphic passes", not eng.looks_blank_yuv(rd(green_gfx), len(green_gfx), "NV12"))
+check("RGB frames are never treated as blank", not eng.looks_blank_yuv(rd(zero), len(zero), "BGRx"))
 
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)

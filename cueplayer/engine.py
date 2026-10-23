@@ -312,14 +312,26 @@ TRANSITIONS = ("cut", "fade", "dip", "slide-left", "slide-right", "slide-up", "s
 YUV_FORMATS = {"NV12", "NV21", "I420", "YV12", "Y42B", "Y444", "NV16", "NV24"}
 
 
-def looks_blank_yuv(sample_byte: Callable[[int], int], size: int, fmt: str) -> bool:
-    """True for an all-zero YUV frame, which displays as solid green: what some hardware
-    decoders hand out before their first real picture. Samples 32 bytes spread across the
-    Y and chroma planes (a real picture is never 0 in all of them, even when black)."""
-    if fmt not in YUV_FORMATS or size < 256:
+CHROMA_START = {"NV12": 2 / 3, "NV21": 2 / 3, "I420": 2 / 3, "YV12": 2 / 3,
+                "Y42B": 1 / 2, "NV16": 1 / 2, "Y444": 1 / 3, "NV24": 1 / 3}
+
+
+def looks_blank_yuv(read: Callable[[int, int], bytes], size: int, fmt: str) -> bool:
+    """True for a frame whose colour (chroma) data is zero, which displays as green - fully
+    if the brightness is zero too, as a green cast if the frame is only partly decoded.
+    Some hardware decoders hand these out around the start of a stream. Reads three 512-byte
+    chunks across the chroma plane; a real picture never has chroma 0 (that would be
+    beyond-saturated green) in nearly all of them - even pure green graphics don't."""
+    if fmt not in YUV_FORMATS or size < 8192:
         return False
-    step = size // 33
-    return all(sample_byte(i * step) == 0 for i in range(1, 33))
+    start = int(size * CHROMA_START.get(fmt, 2 / 3))
+    span = size - start
+    zeros = total = 0
+    for frac in (0.25, 0.5, 0.75):
+        chunk = read(start + int(span * frac) - 256, 512)
+        zeros += chunk.count(0)
+        total += len(chunk)
+    return total > 0 and zeros >= 0.95 * total
 
 
 def parse_colour(hex_colour: str) -> int:
@@ -496,7 +508,7 @@ class _Clip:
 
 class GstEngine(BaseEngine):
     FADE_STEP_MS = 20
-    BLANK_CHECK_FRAMES = 120  # frame checks at the start of each clip (~2 s; each frame is checked twice)
+    BLANK_CHECK_FRAMES = 180  # frame checks at the start of each clip (~3 s; each frame is checked twice)
 
     def __init__(self, on_event: EventCallback):
         super().__init__(on_event)
@@ -678,6 +690,7 @@ class GstEngine(BaseEngine):
         self.status["fps"] = {k: now.get(k, 0) - self._frames_prev.get(k, 0)
                               for k in ("clip", "composited", "display", "display_drops")}
         self._frames_prev = now
+        self.status["blank_frames_hidden"] = now.get("blank", 0)
         return True
 
     def _teardown(self) -> None:
@@ -1348,11 +1361,12 @@ class GstEngine(BaseEngine):
             clip.checked += 1
             caps = pad.get_current_caps()
             fmt = caps.get_structure(0).get_value("format") if caps and caps.get_size() else ""
-            return looks_blank_yuv(lambda off: buf.extract_dup(off, 1)[0], buf.get_size(), fmt or "")
+            return looks_blank_yuv(lambda off, n: buf.extract_dup(off, n), buf.get_size(), fmt or "")
 
         def first_buffer(pad, info):
             if pad is vsrcpad and bad_frame(pad, info.get_buffer()):
                 clip.blank_dropped += 1
+                self._frames["blank"] = self._frames.get("blank", 0) + 1
                 return Gst.PadProbeReturn.DROP  # keep waiting for a real picture
             with clip.lock:
                 if not clip.offset_set:
@@ -1394,6 +1408,7 @@ class GstEngine(BaseEngine):
             # Keeps dropping blank (green) or decoder-flagged corrupt frames after the start
             if bad_frame(pad, info.get_buffer()):
                 clip.blank_dropped += 1
+                self._frames["blank"] = self._frames.get("blank", 0) + 1
                 return Gst.PadProbeReturn.DROP
             return Gst.PadProbeReturn.OK
 
