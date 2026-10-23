@@ -98,5 +98,69 @@ check("real black frame passes", not eng.looks_blank_yuv(rd(black), len(black), 
 check("pure green graphic passes", not eng.looks_blank_yuv(rd(green_gfx), len(green_gfx), "NV12"))
 check("RGB frames are never treated as blank", not eng.looks_blank_yuv(rd(zero), len(zero), "BGRx"))
 
+# ---- pre-roll sequencing: keep the old item until the new one's first frame is due ----
+import types  # noqa: E402
+
+eng.Gst = SimpleNamespace(SECOND=10 ** 9, MSECOND=10 ** 6)
+timers = []
+
+
+class TimerGLib:
+    @staticmethod
+    def timeout_add(ms, fn):
+        timers.append((ms, fn))
+
+
+def engine_stub():
+    me = SimpleNamespace(settings={"output": {"framerate": 30, "canvas_width": 1920, "canvas_height": 1080}},
+                         clips={}, current=None, visible=None, released=[], shown=[], now=0)
+    me._running_time = lambda: me.now
+    me._emit = lambda **k: None
+
+    def release(c):
+        c.dying = True
+        me.clips.pop(c.id, None)
+        me.released.append(c.id)
+        if me.visible is c:
+            me.visible = None
+    me._release = release
+    me._transition = lambda new, old, kind, ms: me.shown.append((new.id, old.id if old else None))
+    me._clip_started = types.MethodType(eng.GstEngine._clip_started, me)
+    me._show = types.MethodType(eng.GstEngine._show, me)
+    return me
+
+
+def mk(me, cid, due):
+    c = SimpleNamespace(id=cid, dying=False, started=False, due_rt=due, transition="cut", fade_ms=0)
+    me.clips[cid] = c
+    return c
+
+
+eng.GLib = TimerGLib
+me = engine_stub()
+a = mk(me, 1, 0); me.visible = a; me.current = a
+b = mk(me, 2, 300 * 10 ** 6)                 # due 300 ms from now
+me._clip_started(b)
+check("pre-roll: old item stays on screen while the new one buffers", me.visible is a and me.shown == [])
+check("pre-roll: switch scheduled for the first frame + 1 frame", timers and 330 <= timers[-1][0] <= 334, timers)
+timers.pop()[1]()
+check("pre-roll: switches once due", me.visible is b and me.shown == [(2, 1)])
+
+me = engine_stub(); timers.clear()
+a = mk(me, 1, 0); me.visible = a; me.current = a
+b = mk(me, 2, 300 * 10 ** 6); c = mk(me, 3, 400 * 10 ** 6)
+me._clip_started(b)
+me._clip_started(c)                          # second trigger before b was shown
+check("rapid triggers: the older pending clip is dropped", 2 in me.released and 1 not in me.released)
+for _, fn in list(timers):
+    fn()
+check("rapid triggers: only the newest is shown, straight from the old one", me.shown == [(3, 1)], me.shown)
+
+me = engine_stub(); timers.clear()
+a = mk(me, 1, 0); me.visible = a; me.current = a
+b = mk(me, 2, 100 * 10 ** 6); newer = mk(me, 3, 0)  # 3 created, still loading (not started)
+me._clip_started(b)
+check("a newer clip still loading is not released", 3 in me.clips, me.released)
+
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)

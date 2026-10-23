@@ -359,7 +359,8 @@ class BaseEngine:
     def stop(self) -> None: ...
 
     def play(self, path: str, kind: str, scale_mode: str, fade_ms: int,
-             duration_hint: float = 0, sw_decode: bool = False, transition: str = "fade") -> int:
+             duration_hint: float = 0, sw_decode: bool = False, transition: str = "fade",
+             preroll_ms: Optional[int] = None) -> int:
         """sw_decode: don't use hardware decoders for this clip (after one failed on it)."""
         raise NotImplementedError
 
@@ -420,7 +421,7 @@ class MockEngine(BaseEngine):
         self.start(settings)
 
     def play(self, path, kind, scale_mode, fade_ms, duration_hint=0, sw_decode=False,
-             transition="fade"):
+             transition="fade", preroll_ms=None):
         cid = next(self._ids)
         for t in self._timers.values():
             t.cancel()
@@ -500,6 +501,8 @@ class _Clip:
         self.decoder: Optional[str] = None
         self.path = ""
         self.checked = 0          # frames checked for blank (green) output
+        self.due_rt = 0           # running time its first frame is scheduled for
+        self.preroll_ms: Optional[int] = None  # None = the output.preroll_ms setting
         self.blank_dropped = 0
         self.transition = "fade"
         self.geom = (0, 0, 0, 0)  # x, y, w, h on the canvas
@@ -519,7 +522,8 @@ class GstEngine(BaseEngine):
         self.comp = None
         self.amix = None
         self.clips: Dict[int, _Clip] = {}
-        self.current: Optional[_Clip] = None
+        self.current: Optional[_Clip] = None   # newest started clip (may still be pre-rolling)
+        self.visible: Optional[_Clip] = None   # clip actually on screen
         self._zorder = itertools.count(1)
         self._ctx = GLib.MainContext.default()
         self._loop = GLib.MainLoop.new(self._ctx, False)
@@ -586,10 +590,10 @@ class GstEngine(BaseEngine):
         self._idle(self._teardown)
 
     def play(self, path, kind, scale_mode, fade_ms, duration_hint=0, sw_decode=False,
-             transition="fade"):
+             transition="fade", preroll_ms=None):
         cid = next(self._ids)
         self._idle(self._play, cid, path, kind, scale_mode, fade_ms, sw_decode, None, False,
-                   transition)
+                   transition, preroll_ms)
         return cid
 
     def play_pattern(self, pattern, fade_ms, label=None, tone=False, transition="fade"):
@@ -707,7 +711,7 @@ class GstEngine(BaseEngine):
             bus.remove_signal_watch()
         self.pipeline = self.comp = self.amix = None
         self.clips.clear()
-        self.current = None
+        self.current = self.visible = None
         self.status["running"] = False
 
     # Hardware decoders that are safe to prefer when present. Most are registered below
@@ -1228,7 +1232,8 @@ class GstEngine(BaseEngine):
         return max(0, clock.get_time() - self.pipeline.get_base_time())
 
     def _play(self, cid, path, kind, scale_mode, fade_ms, sw_decode=False,
-              label: Optional[str] = None, tone: bool = False, transition: str = "fade") -> None:
+              label: Optional[str] = None, tone: bool = False, transition: str = "fade",
+              preroll_ms: Optional[int] = None) -> None:
         if self.pipeline is None:
             self._emit(type="clip_error", clip=cid, error="pipeline not running")
             return
@@ -1241,6 +1246,7 @@ class GstEngine(BaseEngine):
         clip = _Clip(cid, b, kind, scale_mode, fade_ms)
         clip.path = path
         clip.transition = transition if transition in TRANSITIONS else "fade"
+        clip.preroll_ms = preroll_ms
         if pattern:
             src = self._pattern_source(b, path, label, out)
         else:
@@ -1377,8 +1383,14 @@ class GstEngine(BaseEngine):
                         seg = ev.parse_segment()
                         r = seg.to_running_time(Gst.Format.TIME, buf.pts)
                         rt = r if r != Gst.CLOCK_TIME_NONE else 0
-                    # Start the clip slightly in the future so its first frame is not late
-                    offset = self._running_time() - rt + 40 * Gst.MSECOND
+                    # Pre-roll: schedule the first frame this far ahead, so the decoder can
+                    # settle and buffer while the current item keeps playing. The switch
+                    # happens once that frame is due (see _clip_started).
+                    want = clip.preroll_ms if clip.preroll_ms is not None else out.get("preroll_ms", 300)
+                    preroll = max(40, min(3000, int(want))) * Gst.MSECOND
+                    now_rt = self._running_time()
+                    offset = now_rt - rt + preroll
+                    clip.due_rt = now_rt + preroll
                     clip.vghost.set_offset(offset)
                     if clip.aghost is not None:
                         clip.aghost.set_offset(offset)
@@ -1416,7 +1428,7 @@ class GstEngine(BaseEngine):
         clip_pad = vsrcpad
 
         def clip_frames(_pad, _info):
-            if self.current is clip or not self.current:
+            if self.visible is clip or not self.visible:
                 self._frames["clip"] = self._frames.get("clip", 0) + 1
             return Gst.PadProbeReturn.OK
 
@@ -1452,15 +1464,28 @@ class GstEngine(BaseEngine):
         return els[-1]
 
     def _clip_started(self, clip: _Clip) -> None:
+        """First frame decoded (and scheduled pre-roll ms ahead). Keep showing what's on
+        screen until that frame is due, then switch - no black or half-ready frames."""
         if clip.dying or clip.id not in self.clips:
             return
         clip.started = True
-        old = self.current
         self.current = clip
         self._emit(type="clip_started", clip=clip.id)
-        # Any clip other than the new one is now obsolete
-        stale = [c for c in self.clips.values() if c is not clip and c is not old]
-        for c in stale:
+        # Older clips that never made it on screen are obsolete (newer ones still loading are not)
+        for c in [c for c in self.clips.values() if c.id < clip.id and c is not self.visible]:
+            self._release(c)
+        fps = max(1, int(self.settings["output"]["framerate"]))
+        wait_ns = clip.due_rt + Gst.SECOND // fps - self._running_time()
+        GLib.timeout_add(max(1, int(wait_ns / Gst.MSECOND)), lambda: (self._show(clip), False)[1])
+
+    def _show(self, clip: _Clip) -> None:
+        if clip.dying or clip.id not in self.clips or self.current is not clip:
+            return  # superseded by a newer clip before it was due
+        old = self.visible
+        if old is clip:
+            return
+        self.visible = clip
+        for c in [c for c in self.clips.values() if c.id < clip.id and c is not old]:
             self._release(c)
         self._transition(clip, old, clip.transition, clip.fade_ms)
 
@@ -1556,8 +1581,8 @@ class GstEngine(BaseEngine):
             GLib.timeout_add(self.FADE_STEP_MS, tick)
 
     def _black(self, fade_ms: int) -> None:
-        old = self.current
-        self.current = None
+        old = self.visible
+        self.current = self.visible = None
         for c in list(self.clips.values()):
             if c is not old:
                 self._release(c)
@@ -1571,6 +1596,8 @@ class GstEngine(BaseEngine):
         self.clips.pop(clip.id, None)
         if self.current is clip:
             self.current = None
+        if self.visible is clip:
+            self.visible = None
         try:
             for ghost, req, owner in ((clip.vghost, clip.vpad, self.comp),
                                       (clip.aghost, clip.apad, self.amix)):

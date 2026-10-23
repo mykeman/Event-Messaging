@@ -333,6 +333,8 @@ Schedules are per screen.
 
 Each has a duration in milliseconds. Any cue can override the type and duration in its *Transition* column. A command can override them too: `GET /api/cue/3?transition=dip&transition_ms=800`, or over TCP, `CUE 3 TRANSITION=slide-left FADE=600` or `CUE 3 CUT`. Audio crossfades with every type except cut.
 
+**Pre-roll.** A new item first decodes and buffers hidden for **Settings → Canvas → Pre-roll** (default 300 ms) while the current item keeps playing. The switch happens only once the new item's first frame is due, so there's no black gap and no half-ready frames. Rapid triggers go straight to the newest item. Raise the pre-roll if a slower unit still glitches on changes; triggers take that much longer to appear. A video looping back to its start uses a short 80 ms pre-roll, so the loop point doesn't pause.
+
 A new item only appears once its first real picture is decoded. Some hardware decoders hand out a few empty frames at the start of a stream, which show as solid green. The player discards those, and any frame the decoder flags as damaged, so they never reach the screen.
 
 ## Test patterns

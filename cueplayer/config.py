@@ -23,6 +23,9 @@ DEFAULTS: Dict[str, Any] = {
         # Processing time allowed per frame before it is dropped as late (ms). Raise it
         # if the Live tab shows dropped frames; it adds the same delay to every output.
         "latency_ms": 100,
+        # Pre-roll: a new item decodes and buffers this long, hidden, before it replaces
+        # what's on screen. Raise if a slower unit still shows a glitch on changes.
+        "preroll_ms": 300,
     },
     "display": {
         # Physical output (HDMI). The canvas is placed into the display raster at

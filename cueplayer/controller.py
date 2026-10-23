@@ -134,7 +134,8 @@ class Controller:
              mode: str = "adhoc", cue: Optional[str] = None,
              queue: Optional[List[str]] = None, lock: bool = False, force: bool = False,
              label: Optional[str] = None, transition_type: Optional[str] = None,
-             item_duration: Optional[float] = None, source: Optional[str] = None) -> Dict[str, Any]:
+             item_duration: Optional[float] = None, source: Optional[str] = None,
+             preroll_ms: Optional[int] = None) -> Dict[str, Any]:
         item = self.library.resolve(ref)
         if item is None:
             raise PlayError(f"media not found: {ref}")
@@ -144,7 +145,8 @@ class Controller:
         scale = item.get("scale_mode") or self.settings.section("output")["scale_mode"]
         clip = self.engine.play(str(self.library.playable_path(item)), item["kind"], scale, fade,
                                 duration_hint=item.get("duration") or 0,
-                                sw_decode=item.get("decode") == "software", transition=tkind)
+                                sw_decode=item.get("decode") == "software", transition=tkind,
+                                preroll_ms=preroll_ms)
         if item["kind"] == "image" and not duration:
             # A lone looping/held image stays up until the next command;
             # otherwise images advance after the default image duration.
@@ -457,10 +459,12 @@ class Controller:
                       label=st.get("label"), item_duration=ndur, source=st.get("source"))
             return
         if st["loop"] and not forced:
-            # Gapless-ish restart of the same item
+            # Restart of the same item: short pre-roll, so the loop point doesn't hold the
+            # last frame for the full pre-roll time
             self.play(m["id"], loop=True, after=st["after"], mode=st["mode"], cue=st["cue"],
                       transition_ms=0, duration=self._cue_duration(st),
-                      lock=st.get("lock", False), force=True, label=st.get("label"))
+                      lock=st.get("lock", False), force=True, label=st.get("label"),
+                      source=st.get("source"), preroll_ms=80)
             return
         if st["mode"] == "default":
             self.play_default()
