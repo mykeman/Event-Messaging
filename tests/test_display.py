@@ -28,17 +28,28 @@ for fps, hz, ok in [(50, 50, True), (25, 50, True), (30, 60, True), (60, 60, Tru
                     (50, 60, False), (25, 60, False), (30, 50, False), (60, 50, False)]:
     check(f"{fps} fps on {hz} Hz {'smooth' if ok else 'judders'}", cadence_ok(fps, hz) == ok)
 
-# connector detection: port 1 forced on but empty, display on port 2
-with tempfile.TemporaryDirectory() as d:
-    for name, edid, cid in (("card1-HDMI-A-1", b"", "32"), ("card1-HDMI-A-2", b"\x00" * 256, "42"),
-                            ("card0-Writeback-1", b"", "50")):
+# connector detection
+def fake_drm(d, ports):
+    for name, status, edid, cid in ports:
         Path(d, name).mkdir()
+        Path(d, name, "status").write_text(status + "\n")
         Path(d, name, "edid").write_bytes(edid)
-        Path(d, name, "connector_id").write_text(cid + "\n")
-    check("picks the port with a display, not the forced empty one",
+        Path(d, name, "connector_id").write_text(f"{cid}\n")
+
+
+with tempfile.TemporaryDirectory() as d:  # Pi: port 1 forced on (video=...D), screen on port 2
+    fake_drm(d, [("card1-HDMI-A-1", "connected", b"", 32), ("card1-HDMI-A-2", "connected", b"\x00" * 256, 42),
+                 ("card0-Writeback-1", "unknown", b"", 50)])
+    check("forced-on empty port loses to the port with EDID",
           detect_display_connector(d) == (42, "HDMI-A-2"), detect_display_connector(d))
-    Path(d, "card1-HDMI-A-2", "edid").write_bytes(b"")
-    check("no display -> None (kmssink chooses)", detect_display_connector(d) is None)
+with tempfile.TemporaryDirectory() as d:  # Giada F106D: screen connected but no EDID read
+    fake_drm(d, [("card1-DP-1", "disconnected", b"", 269), ("card1-HDMI-A-1", "disconnected", b"", 281),
+                 ("card1-HDMI-A-2", "connected", b"", 287)])
+    check("connected port without EDID is still chosen",
+          detect_display_connector(d) == (287, "HDMI-A-2"), detect_display_connector(d))
+with tempfile.TemporaryDirectory() as d:
+    fake_drm(d, [("card1-HDMI-A-1", "disconnected", b"", 32), ("card1-HDMI-A-2", "disconnected", b"", 42)])
+    check("nothing connected -> None (kmssink chooses)", detect_display_connector(d) is None)
 
 # HDMI audio follows the video port on a Pi
 PI_CARDS = """ 0 [vc4hdmi0       ]: vc4-hdmi - vc4-hdmi-0

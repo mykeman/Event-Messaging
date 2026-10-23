@@ -32,7 +32,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import aes67
 from .common import hostname
@@ -72,18 +72,29 @@ def boot_video_modes(cmdline: Optional[str] = None) -> Dict[str, Tuple[int, int,
 
 
 def detect_display_connector(drm: str = "/sys/class/drm") -> Optional[Tuple[int, str]]:
-    """(connector id, name) of the first connector with a display actually attached (it has
-    an EDID). kmssink's own choice is the first connector reporting "connected", which can be
-    an empty port that video=...D on the kernel command line forced on."""
+    """(connector id, name) of the connector most likely to have the screen on it: one
+    reporting "connected" with an EDID first, then "connected" without one (some PCs and
+    adapters don't pass EDID through). An EDID breaks ties because video=...D on the kernel
+    command line can force an empty port to "connected"."""
+    best: List[Tuple[int, int, str]] = []
     for path in sorted(Path(drm).glob("card*-*")):
         try:
-            if path.joinpath("edid").stat().st_size == 0:
-                continue
+            status = path.joinpath("status").read_text().strip()
             cid = int(path.joinpath("connector_id").read_text().strip())
         except (OSError, ValueError):
             continue
-        return cid, re.sub(r"^card\d+-", "", path.name)
-    return None
+        try:
+            has_edid = path.joinpath("edid").stat().st_size > 0
+        except OSError:
+            has_edid = False
+        if status != "connected" and not has_edid:
+            continue
+        rank = 0 if (status == "connected" and has_edid) else (1 if has_edid else 2)
+        best.append((rank, cid, re.sub(r"^card\d+-", "", path.name)))
+    if not best:
+        return None
+    _, cid, name = min(best)
+    return cid, name
 
 
 def hdmi_alsa_device(port: Optional[str], cards: Optional[str] = None) -> Optional[str]:
@@ -365,7 +376,8 @@ class GstEngine(BaseEngine):
         self._disabled_outputs: set = set()   # outputs switched off after repeated failures
         self._orig_ranks: Dict[str, int] = {}
         self._element_clip: Dict[str, int] = {}  # element name -> clip id
-        self._modeset_fallback = False  # keeping the boot mode failed: let kmssink set one
+        self._display_attempt = 0       # index into the display start-up strategies
+        self._display_attempts = 1
         self._display_port: Optional[str] = None   # e.g. HDMI-A-2, for matching HDMI audio
         self._audio_note = "on"
         self._fail_counts: Dict[str, int] = {}
@@ -398,7 +410,7 @@ class GstEngine(BaseEngine):
 
     def rebuild(self, settings):
         self._disabled_outputs.clear()  # new settings: give every output another chance
-        self._modeset_fallback = False
+        self._display_attempt = 0
         self._idle(self._safe_build, settings)
 
     def _safe_build(self, settings) -> None:
@@ -630,18 +642,29 @@ class GstEngine(BaseEngine):
             # (install.sh --take-hdmi) so its refresh rate is honoured - experimental: on
             # some Pi setups kmssink then draws nothing, so it's opt-in.
             boot = [m for m in boot_video_modes().values() if m[:2] == (dw, dh)]
-            keep = disp.get("modeset", "auto") == "keep" and not self._modeset_fallback
-            sink = self._make("kmssink", force_modesetting=not keep)
+            # Ways to drive the screen, tried in turn when the display output fails to start
+            # (e.g. a screen without EDID has no mode list, so setting a mode is impossible
+            # but reusing the console's current mode works).
+            if disp.get("modeset", "auto") == "keep":
+                attempts = [(False, True), (True, True), (True, False), (False, False)]
+            else:
+                attempts = [(True, True), (True, False), (False, False), (False, True)]
+            self._display_attempts = len(attempts)
+            modeset, pick_port = attempts[min(self._display_attempt, len(attempts) - 1)]
+            keep = not modeset
+            sink = self._make("kmssink", force_modesetting=modeset)
             port_note = ""
+            found = detect_display_connector()
+            if found:
+                self._display_port = found[1]
             if int(disp.get("connector_id") or 0) > 0:
                 sink.set_property("connector-id", int(disp["connector_id"]))
                 port_note = f"connector {int(disp['connector_id'])}"
-            else:
-                found = detect_display_connector()
-                if found:
-                    sink.set_property("connector-id", found[0])
-                    port_note = found[1]
-                    self._display_port = found[1]
+            elif pick_port and found:
+                sink.set_property("connector-id", found[0])
+                port_note = found[1]
+            if self._display_attempt:
+                port_note = (port_note + " " if port_note else "") + f"(fallback {self._display_attempt})"
             if keep:
                 refresh = boot[0][2] if boot else 0.0
                 mode_note = f"@{refresh:g}Hz (boot mode)" if refresh else "(current mode)"
@@ -1205,11 +1228,12 @@ class GstEngine(BaseEngine):
                 name = "audio_sink"  # the real sink inside autoaudiosink
             out = {"display_sink": "display", "ndi_sink": "ndi", "aes67_sink": "aes67",
                    "audio_sink": "audio"}.get(name)
-            if out == "display" and not self._modeset_fallback and \
-                    msg.src.find_property("force-modesetting") and \
-                    not msg.src.get_property("force-modesetting"):
-                log.warning("kmssink could not use the current display mode - letting it set one")
-                self._modeset_fallback = True
+            if out == "display" and self._display_attempt < self._display_attempts - 1:
+                self._display_attempt += 1
+                log.warning("display output failed to start - trying another way (%d of %d)",
+                            self._display_attempt + 1, self._display_attempts)
+                self._schedule_restart(1)
+                return
             if out:
                 self._fail_counts[out] = self._fail_counts.get(out, 0) + 1
                 if self._fail_counts[out] >= 3:
@@ -1224,7 +1248,7 @@ class GstEngine(BaseEngine):
             w, _ = msg.parse_warning()
             log.warning("gst warning from %s: %s", msg.src.get_name(), w.message)
 
-    def _schedule_restart(self) -> None:
+    def _schedule_restart(self, delay: int = 5) -> None:
         if self._restart_timer:
             return
 
@@ -1234,7 +1258,7 @@ class GstEngine(BaseEngine):
             self._safe_build(self.settings)
             return False
 
-        self._restart_timer = GLib.timeout_add_seconds(5, restart)
+        self._restart_timer = GLib.timeout_add_seconds(delay, restart)
 
 
 def create_engine(on_event: EventCallback, force_mock: bool = False) -> BaseEngine:
