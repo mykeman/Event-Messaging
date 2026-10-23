@@ -449,6 +449,14 @@ class GstEngine(BaseEngine):
             raise RuntimeError(f"GStreamer element '{factory}' not available")
         for k, v in props.items():
             el.set_property(k.replace("_", "-"), v)
+        # Converters run single-threaded by default; a Pi has 4 cores, and a 1080p
+        # format conversion on one ARM core is slow enough to halve the HDMI frame rate.
+        if factory in ("videoconvert", "videoscale", "videoconvertscale") and el.find_property("n-threads") \
+                and "n_threads" not in props:
+            el.set_property("n-threads", max(1, os.cpu_count() or 1))
+        # Cheaper resampling (only used when a file isn't 48 kHz); default 4 is costly on ARM
+        if factory == "audioresample" and el.find_property("quality") and "quality" not in props:
+            el.set_property("quality", 2)
         return el
 
     @staticmethod
@@ -663,6 +671,7 @@ class GstEngine(BaseEngine):
         fps = float(self.settings["output"]["framerate"])
         mode_note = ""
         self.status.pop("display_warning", None)
+        self.status.pop("display_format", None)
         self.status.pop("display_refresh", None)
         if kind == "kms":
             # kmssink's own modesetting picks the first mode with the right resolution,
@@ -759,6 +768,17 @@ class GstEngine(BaseEngine):
         els.append(sink)
         self._branch(tee, *els)
         self._count(sink.get_static_pad("sink"), "display")
+
+        def caps_probe(_pad, info):
+            ev = info.get_event()
+            if ev.type == Gst.EventType.CAPS:
+                st = ev.parse_caps().get_structure(0)
+                fmt = st.get_value("format") or "?"
+                canvas = "NV12"
+                self.status["display_format"] = fmt if fmt == canvas and (ow, oh) == (cw, ch) \
+                    else f"{fmt} (converted from {canvas} {cw}x{ch} on the CPU)"
+            return Gst.PadProbeReturn.OK
+        sink.get_static_pad("sink").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, caps_probe)
         self.status["display"] = f"{kind} {dw}x{dh}{' ' + mode_note if mode_note else ''} · canvas at {x},{y} ({ow}x{oh})"
 
     def _build_audio(self, audio, low_latency: bool = False) -> Any:
@@ -1081,6 +1101,13 @@ class GstEngine(BaseEngine):
         # Hold the new clip invisible until its first frame arrives
         self.pipeline.add(b)
         clip.vpad = self._req(self.comp)
+        # Let the compositor convert/scale this input on all cores too
+        if clip.vpad.find_property("converter-config"):
+            try:
+                clip.vpad.set_property("converter-config", Gst.Structure.new_from_string(
+                    f"config, GstVideoConverter.threads=(uint){max(1, os.cpu_count() or 1)}"))
+            except (TypeError, ValueError):
+                pass
         clip.vpad.set_property("zorder", next(self._zorder))
         clip.vpad.set_property("alpha", 0.0)
         if clip.vpad.find_property("repeat-after-eos"):

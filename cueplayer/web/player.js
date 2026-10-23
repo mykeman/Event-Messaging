@@ -50,7 +50,7 @@ function renderStatus() {
   $("#now-title").textContent = m ? m.name : (st.mode === "black" ? "Black" : "—");
   const eng = st.engine || {};
   $("#st-ndi").textContent = eng.ndi || "—";
-  $("#st-display").textContent = eng.display || "—";
+  $("#st-display").textContent = (eng.display || "—") + (eng.display_format ? " · " + eng.display_format : "");
   $("#st-audio").textContent = eng.audio || "—";
   $("#st-display-warn").textContent = eng.display_warning ? "⚠ " + eng.display_warning : "";
   $("#st-display-warn").classList.toggle("hidden", !eng.display_warning);
