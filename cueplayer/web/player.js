@@ -33,6 +33,8 @@ const SETTINGS_FORM = [
       ["ptime_ms", "Packet time (ms)", "select", [1, 0.125, 0.25, 4]], ["ptp_domain", "PTP domain", "number"],
       ["ttl", "TTL", "number"], ["dscp", "Media DSCP", "number"],
       ["session_name", "Session name", "text", null, "wide"]] },
+  { section: "schedule", title: "Schedule", note: "Timezone for schedule times, e.g. Australia/Melbourne. Blank = the unit's system clock (often UTC on a server install).",
+    fields: [["timezone", "Timezone", "text", null, "wide"]] },
   { section: "preview", title: "Web preview", fields: [["enabled", "Enabled", "check"], ["fps", "FPS", "number"], ["width", "Width", "number"]] },
   { section: "control", title: "Control", note: "Port changes take effect after a service restart.",
     fields: [["http_port", "HTTP port", "number"], ["tcp_port", "TCP port", "number"], ["udp_port", "UDP port", "number"],
@@ -49,7 +51,8 @@ function renderStatus() {
   if (!st) return;
   const m = st.media;
   $("#now-badge").replaceChildren(badge(st.mode));
-  $("#now-cue").textContent = st.cue ? "Cue " + st.cue + (cueLabel(st.cue) ? " · " + cueLabel(st.cue) : "") : "";
+  $("#now-cue").textContent = st.cue ? "Cue " + st.cue + (cueLabel(st.cue) ? " · " + cueLabel(st.cue) : "")
+    : (st.source && st.source !== "normal playlist" ? st.source : "");
   $("#now-title").textContent = m ? m.name : (st.mode === "black" ? "Black" : "—");
   const eng = st.engine || {};
   $("#st-ndi").textContent = eng.ndi || "—";
@@ -543,6 +546,7 @@ async function init() {
     if (msg.status) { S.status = msg.status; renderStatus(); }
     if (msg.event === "library") await loadMedia();
     if (msg.event === "cues") await loadCues();
+    if (msg.event === "schedule" && typeof loadSchedule === "function") loadSchedule();
     if (msg.event === "settings") { await loadSettings(); renderDefault(); }
     if (msg.event === "error") toast(msg.error, "err");
     if (msg.event === "notice") toast(msg.message, "ok");
@@ -551,6 +555,7 @@ async function init() {
     $("#conn-text").textContent = on ? "live" : "reconnecting";
   });
   setInterval(loadInfo, 30000);
+  if ((location.hash || "") === "#schedule" && typeof loadSchedule === "function") loadSchedule();
   // Engine stats (decoder, dropped frames) change between playback events
   setInterval(async () => {
     if (document.hidden || !$("#tab-live").classList.contains("active")) return;
@@ -558,5 +563,5 @@ async function init() {
   }, 1000);
 }
 
-initTabs(name => { if (name === "live") startPreview(); });
+initTabs(name => { if (name === "live") startPreview(); if (name === "schedule" && typeof loadSchedule === "function") loadSchedule(); });
 init();

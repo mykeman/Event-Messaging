@@ -219,6 +219,12 @@ def player_handler(ctrl) -> Handler:
             st = ctrl.play_default(parse_opts(args).get("transition_ms"))
         elif cmd == "BLACK":
             st = ctrl.black(parse_opts(args).get("transition_ms"))
+        elif cmd == "PLAYLIST":
+            if not args:
+                return "ERR PLAYLIST needs a playlist name"
+            o = parse_opts(args[1:])
+            st = ctrl.play_playlist(args[0], o.get("loop", True), o.get("transition_ms"),
+                                    o.get("transition_type"), bool(o.get("force")))
         elif cmd == "TEST":
             name = args[0] if args and "=" not in args[0] and args[0].upper() not in (
                 "TONE", "NOLABEL", "FORCE") else "smpte"
@@ -233,7 +239,7 @@ def player_handler(ctrl) -> Handler:
         elif cmd == "STATUS":
             return status_line(ctrl.status())
         elif cmd == "HELP":
-            return "OK commands: PING AUTH CUE PLAY NORMAL BLACK NEXT TEST STATUS EVENTS ON|OFF (opts: LOOP HOLD FORCE)"
+            return "OK commands: PING AUTH CUE PLAY PLAYLIST NORMAL BLACK NEXT TEST STATUS EVENTS ON|OFF (opts: LOOP HOLD FORCE)"
         else:
             return f"ERR unknown command {cmd}"
         return status_line(st, "OK")

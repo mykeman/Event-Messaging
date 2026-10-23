@@ -13,6 +13,7 @@
     <a href="#live">Live</a>
     <a href="#library">Media</a>
     <a href="#cues">Cues</a>
+    <a href="#schedule">Schedule</a>
     <a href="#settings">Settings</a>
     <a href="#api">API</a>
   </nav>
@@ -149,6 +150,38 @@
     </div>
   </section>
 
+  <!-- SCHEDULE -->
+  <section class="tab" id="tab-schedule">
+    <div class="sched-layout">
+      <div class="card">
+        <div class="row between"><h2>Playlists</h2><button class="primary" id="pl-new">New playlist</button></div>
+        <div class="grid" id="pl-list" style="gap:6px"></div>
+        <div id="pl-editor" class="hidden" style="margin-top:14px; border-top:1px solid var(--line); padding-top:12px">
+          <label class="field"><span>Name</span><input id="pl-name"></label>
+          <label class="check small" style="margin:8px 0"><input type="checkbox" id="pl-shuffle"> Shuffle</label>
+          <div class="playlist" id="pl-items"></div>
+          <div class="row" style="margin-top:8px"><select id="pl-add" style="flex:1; min-width:0"></select><button id="pl-add-btn">Add</button></div>
+          <p class="small muted">Seconds = how long an image shows (blank = Settings image duration). Videos play to the end.</p>
+          <div class="row"><button class="primary" id="pl-save">Save</button><button id="pl-play" title="Play this playlist now">▶ Play now</button>
+            <span style="flex:1"></span><button class="danger" id="pl-delete">Delete</button></div>
+        </div>
+      </div>
+      <div class="card" style="min-width:0">
+        <div class="row between">
+          <div class="row"><button class="icon" id="cal-prev" title="Previous week">◀</button><button id="cal-today">This week</button>
+            <button class="icon" id="cal-next" title="Next week">▶</button><b id="cal-label" style="margin-left:6px"></b></div>
+          <button class="primary" id="cal-new">New entry</button>
+        </div>
+        <div class="small muted" id="cal-now" style="margin:6px 0 10px"></div>
+        <div class="cal" id="cal"></div>
+        <h3>Upcoming</h3>
+        <div class="grid small" id="cal-upcoming" style="gap:4px"></div>
+        <p class="small muted">A scheduled playlist replaces the Normal playlist while it's on. Cues and scenarios still interrupt it;
+          entries marked <b>take over</b> also cut off event cues when they start (never a locked scenario).</p>
+      </div>
+    </div>
+  </section>
+
   <!-- SETTINGS -->
   <section class="tab" id="tab-settings">
     <div class="grid cols-2">
@@ -194,5 +227,6 @@
 
 <script src="/static/common.js"></script>
 <script src="/static/player.js"></script>
+<script src="/static/schedule.js"></script>
 </body>
 </html>

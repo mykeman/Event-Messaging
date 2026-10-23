@@ -111,6 +111,99 @@ def create_player_app(ctrl: Controller) -> FastAPI:
             overrides["after"] = o["after"]
         return run(ctrl.play_cue, ref, **overrides)
 
+    # ---- playlists & schedule ------------------------------------------------------
+    @app.get("/api/playlists", dependencies=[api])
+    def playlists():
+        return ctrl.schedule.list_playlists()
+
+    @app.post("/api/playlists", dependencies=[api])
+    async def playlist_create(request: Request):
+        try:
+            pl = ctrl.schedule.save_playlist(None, await request.json())
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        bus.publish({"event": "schedule"})
+        return pl
+
+    @app.put("/api/playlists/{pid}", dependencies=[api])
+    async def playlist_save(pid: str, request: Request):
+        if not ctrl.schedule.get_playlist(pid):
+            raise HTTPException(404, "playlist not found")
+        try:
+            pl = ctrl.schedule.save_playlist(pid, await request.json())
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        bus.publish({"event": "schedule"})
+        return pl
+
+    @app.delete("/api/playlists/{pid}", dependencies=[api])
+    def playlist_delete(pid: str):
+        in_use = [e["title"] for e in ctrl.schedule.list_entries().values() if e["playlist"] == pid]
+        if in_use:
+            raise HTTPException(409, "playlist is used by the schedule: " + ", ".join(in_use))
+        if not ctrl.schedule.delete_playlist(pid):
+            raise HTTPException(404, "playlist not found")
+        bus.publish({"event": "schedule"})
+        return {"ok": True}
+
+    @app.api_route("/api/playlist/{ref}/play", methods=["GET", "POST"], dependencies=[api])
+    async def playlist_play(ref: str, p: Dict[str, Any] = Depends(params)):
+        kind, ms = transition_params(p)
+        return run(ctrl.play_playlist, ref, as_bool(p.get("loop", True)), ms, kind,
+                   as_bool(p.get("force", False)))
+
+    @app.get("/api/schedule", dependencies=[api])
+    def schedule_entries():
+        return ctrl.schedule.list_entries()
+
+    @app.get("/api/schedule/now", dependencies=[api])
+    def schedule_now():
+        return dict(ctrl.schedule_status(), upcoming=ctrl.schedule.upcoming(ctrl.now(), 10))
+
+    @app.get("/api/schedule/occurrences", dependencies=[api])
+    def schedule_occurrences(start: str, end: str):
+        """Expanded occurrences between two local date-times (for the calendar)."""
+        import datetime as _dt
+        try:
+            a, b = _dt.datetime.fromisoformat(start[:16]), _dt.datetime.fromisoformat(end[:16])
+        except ValueError:
+            raise HTTPException(400, "start/end must be like 2026-10-19T00:00")
+        if (b - a).days > 62:
+            raise HTTPException(400, "range too long (max 62 days)")
+        return ctrl.schedule.occurrences(a, b)
+
+    async def _schedule_changed():
+        ctrl._sched_key = ("recheck",)  # never equals a real key, even 'nothing on'
+        ctrl.check_schedule()
+        bus.publish({"event": "schedule"})
+
+    @app.post("/api/schedule", dependencies=[api])
+    async def schedule_create(request: Request):
+        try:
+            e = ctrl.schedule.save_entry(None, await request.json())
+        except ValueError as ex:
+            raise HTTPException(400, str(ex))
+        await _schedule_changed()
+        return e
+
+    @app.put("/api/schedule/{eid}", dependencies=[api])
+    async def schedule_save(eid: str, request: Request):
+        if eid not in ctrl.schedule.entries:
+            raise HTTPException(404, "schedule entry not found")
+        try:
+            e = ctrl.schedule.save_entry(eid, await request.json())
+        except ValueError as ex:
+            raise HTTPException(400, str(ex))
+        await _schedule_changed()
+        return e
+
+    @app.delete("/api/schedule/{eid}", dependencies=[api])
+    async def schedule_delete(eid: str):
+        if not ctrl.schedule.delete_entry(eid):
+            raise HTTPException(404, "schedule entry not found")
+        await _schedule_changed()
+        return {"ok": True}
+
     @app.get("/api/test", dependencies=[api])
     def test_patterns():
         from .engine import TEST_PATTERNS
@@ -230,6 +323,7 @@ def create_player_app(ctrl: Controller) -> FastAPI:
         if not lib.delete(item_id):
             raise HTTPException(404, "not found")
         ctrl._prune_default(item_id)
+        ctrl.schedule.drop_media(item_id)
         bus.publish({"event": "library"})
         return {"ok": True}
 

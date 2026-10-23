@@ -188,3 +188,29 @@ pre.api { background: #0a0c10; border: 1px solid var(--line); padding: 12px; bor
 #jobs .job.error .job-title, #jobs .job.error .job-detail { color: #fca5a5; white-space: normal; }
 .progress.indeterminate > div { width: 30% !important; animation: indet 1.2s ease-in-out infinite; }
 @keyframes indet { from { margin-left: -30%; } to { margin-left: 100%; } }
+
+/* schedule */
+.sched-layout { display: grid; grid-template-columns: minmax(260px, 340px) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 900px) { .sched-layout { grid-template-columns: 1fr; } }
+.pl-row { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--panel-2); cursor: pointer; min-width: 0; }
+.pl-row.active { border-color: var(--accent); }
+.pl-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.cal { --hour: 34px; display: grid; grid-template-columns: 44px repeat(7, minmax(0, 1fr)); border: 1px solid var(--line);
+  border-radius: 8px; overflow: auto; max-height: 620px; position: relative; background: #0c0e12; }
+.cal .head { position: sticky; top: 0; z-index: 3; background: var(--panel); border-bottom: 1px solid var(--line);
+  padding: 6px 4px; font-size: 12px; text-align: center; }
+.cal .head.today { color: var(--accent); font-weight: 700; }
+.cal .gutter { position: relative; height: calc(var(--hour) * 24); }
+.cal .gutter span { position: absolute; right: 6px; font-size: 10px; color: var(--muted); transform: translateY(-50%); }
+.cal .day { position: relative; height: calc(var(--hour) * 24); border-left: 1px solid var(--line); cursor: copy;
+  background-image: repeating-linear-gradient(to bottom, transparent 0, transparent calc(var(--hour) - 1px), #1c2029 calc(var(--hour) - 1px), #1c2029 var(--hour)); }
+.cal .day.today { background-color: rgba(61,139,253,.05); }
+.cal .blk { position: absolute; left: 3px; right: 3px; border-radius: 6px; padding: 3px 6px; font-size: 11px; line-height: 1.25;
+  background: var(--accent-2); color: #fff; overflow: hidden; cursor: pointer; border: 1px solid rgba(255,255,255,.18); z-index: 1; }
+.cal .blk.on { box-shadow: 0 0 0 2px #fff inset; }
+.cal .blk b { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal .nowline { position: absolute; left: 0; right: 0; height: 2px; background: var(--live); z-index: 2; pointer-events: none; }
+.days-pick { display: flex; gap: 4px; flex-wrap: wrap; }
+.days-pick label { display: flex; gap: 3px; align-items: center; font-size: 12px; background: var(--panel-2); border: 1px solid var(--line);
+  padding: 3px 7px; border-radius: 6px; cursor: pointer; }

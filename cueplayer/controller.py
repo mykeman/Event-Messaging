@@ -41,6 +41,10 @@ class Controller:
         self.history: List[Dict[str, Any]] = []
         self._failures: Dict[str, int] = {}   # media id -> consecutive playback failures
         self._skip_once: Optional[str] = None
+        from .schedule import Schedule
+        self.schedule = Schedule(library.dir)
+        self._sched_key: Optional[tuple] = None
+        self._sched_active: Optional[Dict[str, Any]] = None
 
     # ---- lifecycle --------------------------------------------------------------
     async def start(self) -> None:
@@ -48,6 +52,7 @@ class Controller:
         self.engine.start(self.settings.get())
         # The engine emits engine_started; the default content starts then.
         asyncio.create_task(self._housekeeping())
+        asyncio.create_task(self._schedule_loop())
         # Check every file against this unit's hardware (also converts existing libraries)
         self.loop.run_in_executor(None, self.transcoder.evaluate_all)
 
@@ -56,6 +61,9 @@ class Controller:
 
     def apply_settings(self, patch: Dict[str, Any]) -> Dict[str, Any]:
         changed = self.settings.update(patch)
+        if "schedule" in changed:  # timezone changed: re-evaluate what's on now
+            self._sched_key = ("recheck",)
+            self.check_schedule()
         if changed & {"output", "transcode"}:
             self.loop.run_in_executor(None, self.transcoder.evaluate_all)
         if changed & set(PIPELINE_SECTIONS):
@@ -80,6 +88,10 @@ class Controller:
         if s["started"]:
             s["elapsed"] = round(time.time() - s["started"], 2)
         s["engine"] = self.engine.status
+        try:
+            s["schedule"] = self.schedule_status()
+        except Exception:
+            pass
         return s
 
     def subscribe(self, fn: Callable[[Dict[str, Any]], None]) -> Callable[[], None]:
@@ -121,7 +133,8 @@ class Controller:
              after: str = "default", transition_ms: Optional[int] = None,
              mode: str = "adhoc", cue: Optional[str] = None,
              queue: Optional[List[str]] = None, lock: bool = False, force: bool = False,
-             label: Optional[str] = None, transition_type: Optional[str] = None) -> Dict[str, Any]:
+             label: Optional[str] = None, transition_type: Optional[str] = None,
+             item_duration: Optional[float] = None, source: Optional[str] = None) -> Dict[str, Any]:
         item = self.library.resolve(ref)
         if item is None:
             raise PlayError(f"media not found: {ref}")
@@ -144,6 +157,7 @@ class Controller:
             "loop": loop, "after": after, "transition_ms": transition_ms,
             "transition_type": transition_type,
             "queue": list(queue or []), "lock": bool(lock), "label": label,
+            "item_duration": item_duration, "source": source,
         }
         if duration:
             self._timer = self.loop.call_later(duration, self._on_finished, clip)
@@ -203,18 +217,35 @@ class Controller:
         """Stop the triggered content and return to the default content."""
         return self.play_default(transition_ms)
 
-    def play_default(self, transition_ms: Optional[int] = None) -> Dict[str, Any]:
+    def _normal_items(self):
+        """What the normal (fallback) layer plays now: the scheduled playlist if an entry is
+        on, else the Normal playlist. -> (ids, durations, shuffle, source label, black?)"""
         pb = self.settings.section("playback")
+        act = self._sched_active
+        if act and act.get("playlist") == "black":
+            return [], {}, False, f"schedule: {act['title']}", True
+        if act and act.get("playlist") not in (None, "", "normal"):
+            pl = self.schedule.get_playlist(act["playlist"])
+            items = [i for i in (pl or {}).get("items", []) if self.library.get(i["media"])]
+            if items:
+                return ([i["media"] for i in items], {i["media"]: i.get("duration") for i in items},
+                        bool(pl.get("shuffle")), f"schedule: {act['title']}", False)
         ids = [i for i in pb.get("default_playlist") or [] if self.library.get(i)]
-        if pb.get("default_mode") != "playlist" or not ids:
+        label = f"schedule: {act['title']}" if act else "normal playlist"
+        return ids, {}, bool(pb.get("default_shuffle")), label, pb.get("default_mode") != "playlist"
+
+    def play_default(self, transition_ms: Optional[int] = None) -> Dict[str, Any]:
+        ids, durations, shuffle, source, black = self._normal_items()
+        if black or not ids:
             st = self.black(transition_ms)
             self.state["mode"] = "default"
+            self.state["source"] = source
             self._notify()
             return st
         if self._skip_once in ids and len(ids) > 1:
             ids = [i for i in ids if i != self._skip_once]
         self._skip_once = None
-        if pb.get("default_shuffle") and len(ids) > 1:
+        if shuffle and len(ids) > 1:
             choices = [i for i in range(len(ids)) if i != self._default_idx]
             self._default_idx = random.choice(choices)
         else:
@@ -222,8 +253,69 @@ class Controller:
         # A single default item loops; a playlist advances
         single = len(ids) == 1
         # Returning to normal is how a locked scenario is cleared, so it always wins
-        return self.play(ids[self._default_idx], mode="default", loop=single,
-                         after="default", transition_ms=transition_ms, force=True)
+        mid = ids[self._default_idx]
+        return self.play(mid, mode="default", loop=single, after="default",
+                         transition_ms=transition_ms, force=True,
+                         duration=None if single else durations.get(mid), source=source)
+
+    def play_playlist(self, ref: Any, loop: bool = True, transition_ms: Optional[int] = None,
+                      transition_type: Optional[str] = None, force: bool = False) -> Dict[str, Any]:
+        """Play a playlist now (ad hoc), looping by default, until the next command."""
+        pl = self.schedule.get_playlist(ref)
+        if pl is None:
+            raise PlayError(f"playlist not found: {ref}")
+        items = [i for i in pl["items"] if self.library.get(i["media"])]
+        if pl.get("shuffle"):
+            random.shuffle(items)
+        if not items:
+            raise PlayError(f"playlist '{pl['name']}' has no media")
+        first, rest = items[0], [dict(i) for i in items[1:]]
+        return self.play(first["media"], loop=loop, mode="adhoc", queue=rest,
+                         duration=first.get("duration"), item_duration=first.get("duration"),
+                         transition_ms=transition_ms, transition_type=transition_type,
+                         force=force, source=f"playlist: {pl['name']}")
+
+    # ---- schedule -------------------------------------------------------------------
+    def now(self):
+        from .schedule import _now
+        return _now(self.settings.section("schedule").get("timezone", ""))
+
+    def schedule_status(self) -> Dict[str, Any]:
+        now = self.now()
+        act = self._sched_active
+        nxt = self.schedule.upcoming(now, 1)
+        return {"now": now.isoformat(timespec="seconds"),
+                "timezone": self.settings.section("schedule").get("timezone") or "system",
+                "active": {k: act.get(k) for k in ("id", "title", "playlist", "occ_start", "occ_end")} if act else None,
+                "next": {k: nxt[0].get(k) for k in ("id", "title", "occ_start", "occ_end")} if nxt else None}
+
+    def check_schedule(self) -> None:
+        """Apply the schedule entry that's on now, if it changed."""
+        act = self.schedule.active(self.now())
+        key = (act["id"], act["occ_start"]) if act else None
+        if key == self._sched_key:
+            return
+        prev = self._sched_active
+        self._sched_key, self._sched_active = key, act
+        self._default_idx = -1
+        log.info("schedule: %s", f"'{act['title']}' until {act['occ_end']}" if act else
+                 f"'{prev['title']}' ended" if prev else "nothing scheduled")
+        mode = self.state.get("mode")
+        if mode in ("default", "starting"):
+            self.play_default()
+        elif act and act.get("takeover") and not self.state.get("lock") and \
+                mode in ("cue", "adhoc", "hold", "test"):
+            self.play_default()  # the entry interrupts event content (never a locked scenario)
+        else:
+            self._notify("schedule")
+
+    async def _schedule_loop(self) -> None:
+        while True:
+            try:
+                self.check_schedule()
+            except Exception:
+                log.exception("schedule check failed")
+            await asyncio.sleep(5)
 
     def next(self, force: bool = False) -> Dict[str, Any]:
         self._check_lock(False, force)
@@ -355,12 +447,14 @@ class Controller:
         if queue:
             nxt = queue.pop(0)
             if st["loop"]:
-                queue.append(m["id"])
-            self.play(nxt, loop=st["loop"], after=st["after"], mode=st["mode"], cue=st["cue"],
+                queue.append({"media": m["id"], "duration": st.get("item_duration")}
+                             if st.get("item_duration") else m["id"])
+            nid, ndur = (nxt.get("media"), nxt.get("duration")) if isinstance(nxt, dict) else (nxt, None)
+            self.play(nid, loop=st["loop"], after=st["after"], mode=st["mode"], cue=st["cue"],
                       queue=queue, transition_ms=st["transition_ms"],
                       transition_type=st.get("transition_type"),
-                      duration=self._cue_duration(st), lock=st.get("lock", False), force=True,
-                      label=st.get("label"))
+                      duration=ndur or self._cue_duration(st), lock=st.get("lock", False), force=True,
+                      label=st.get("label"), item_duration=ndur, source=st.get("source"))
             return
         if st["loop"] and not forced:
             # Gapless-ish restart of the same item

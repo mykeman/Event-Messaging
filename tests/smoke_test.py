@@ -200,6 +200,31 @@ def main():
         c.patch("/api/settings", json={"transition": {"type": "cut"}})
         c.get("/api/normal")
 
+        # --- playlists + schedule ---
+        import datetime as _dt
+        pl = c.post("/api/playlists", json={"name": "Evening", "items": [{"media": vid["id"]}, {"media": img["id"], "duration": 2}]}).json()
+        check(pl["name"] == "Evening" and len(pl["items"]) == 2, "create playlist")
+        now = _dt.datetime.now().replace(second=0, microsecond=0)
+        f = lambda d: d.strftime("%Y-%m-%dT%H:%M")  # noqa: E731
+        ent = c.post("/api/schedule", json={"title": "Show", "playlist": pl["id"], "start": f(now - _dt.timedelta(minutes=5)),
+                                             "end": f(now + _dt.timedelta(hours=1))}).json()
+        time.sleep(0.5)
+        st = c.get("/api/status").json()
+        check(st["mode"] == "default" and st.get("source") == "schedule: Show" and st["media"]["id"] == vid["id"],
+              f"scheduled playlist replaces normal ({st.get('source')})")
+        check(st["schedule"]["active"]["title"] == "Show", "status reports active entry")
+        check(c.delete(f"/api/playlists/{pl['id']}").status_code == 409, "playlist in use can't be deleted")
+        occ = c.get("/api/schedule/occurrences", params={"start": f(now - _dt.timedelta(days=1)), "end": f(now + _dt.timedelta(days=1))}).json()
+        check(len(occ) == 1 and occ[0]["title"] == "Show", "occurrences for calendar")
+        check(c.patch("/api/settings", json={"schedule": {"timezone": "Mars/Base"}}).status_code == 400, "bad timezone rejected")
+        c.delete(f"/api/schedule/{ent['id']}")
+        time.sleep(0.5)
+        st = c.get("/api/status").json()
+        check(st.get("source") == "normal playlist", f"entry removed: back to normal playlist ({st['mode']}, {st.get('source')}, {st['media']})")
+        out = tcp(["PLAYLIST Evening", "NORMAL"])
+        check(any(l.startswith("OK mode=adhoc") for l in out), f"tcp PLAYLIST {out[:1]}")
+        check(c.delete(f"/api/playlists/{pl['id']}").status_code == 200, "delete unused playlist")
+
         # --- test patterns ---
         pats = c.get("/api/test").json()
         check("smpte" in pats and "smpte-hd" in pats, "test pattern list")

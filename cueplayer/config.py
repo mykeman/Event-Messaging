@@ -96,6 +96,10 @@ DEFAULTS: Dict[str, Any] = {
         "default_playlist": [],
         "default_shuffle": False,
     },
+    "schedule": {
+        # IANA timezone for schedule times, e.g. Australia/Melbourne. Blank = system clock's.
+        "timezone": "",
+    },
     "control": {
         "http_port": 8080,
         "tcp_port": 7700,
@@ -121,7 +125,14 @@ PIPELINE_SECTIONS = ("output", "display", "ndi", "audio", "aes67", "preview")
 
 def _validators() -> Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]]:
     from . import aes67
-    return {"aes67": aes67.validate}
+
+    def schedule(section):
+        from .schedule import valid_timezone
+        tz = str(section.get("timezone") or "").strip()
+        if not valid_timezone(tz):
+            raise ValueError(f"schedule: unknown timezone '{tz}' (e.g. Australia/Melbourne)")
+        return dict(section, timezone=tz)
+    return {"aes67": aes67.validate, "schedule": schedule}
 
 
 def _merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:

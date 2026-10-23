@@ -310,6 +310,18 @@ A single always-running GStreamer pipeline renders the canvas. A live background
 
 Back up this directory to back up a unit.
 
+## Playlists and schedule
+
+The **Schedule** tab has a playlist editor and a week calendar.
+
+- **Playlists** are named, ordered lists of videos and images. Each image can have its own on-screen time; blank uses the Settings image duration. A playlist can shuffle. **▶ Play now**, `GET /api/playlist/<name>/play` and TCP `PLAYLIST <name>` all play a playlist straight away, looping.
+- **Schedule entries** play a playlist (or the Normal playlist, or black) from a start to an end time. An entry runs once, every day, or weekly on chosen days, with an optional *until* date. An end time earlier than the start runs past midnight. Click an empty slot in the calendar to add an entry, or click an entry to edit it. Where entries overlap, the one that started most recently wins.
+- **How it plays:** while an entry is on, its playlist **replaces the Normal playlist** as the fallback content. Cues and scenarios still interrupt it, and it resumes when they finish. A locked scenario always wins. An entry marked **take over** also cuts off event cues when it starts.
+- **Time:** schedules use the unit's clock. Set **Settings → Schedule → Timezone** (e.g. `Australia/Melbourne`), since server installs often run on UTC. The calendar shows the unit's current time and what's on now.
+- **API:** `GET/POST/PUT/DELETE /api/playlists`, `/api/schedule`, `GET /api/schedule/now` (active, next and upcoming), and `GET /api/schedule/occurrences?start=…&end=…`.
+
+Schedules are per screen.
+
 ## Transitions
 
 **Settings → Transitions** sets the default change between items:
