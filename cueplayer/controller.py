@@ -156,6 +156,30 @@ class Controller:
         opts.update({k: v for k, v in overrides.items() if v is not None})
         return self.play(items[0], mode="cue", cue=cue["number"], queue=items[1:], **opts)
 
+    def test_pattern(self, pattern: str = "smpte", tone: bool = False, label: bool = True,
+                     transition_ms: Optional[int] = None, force: bool = False) -> Dict[str, Any]:
+        """Show a test pattern on every output until the next command (e.g. NORMAL)."""
+        from .common import hostname
+        from .engine import TEST_PATTERNS
+        pattern = (pattern or "smpte").lower()
+        if pattern not in TEST_PATTERNS:
+            raise PlayError(f"unknown test pattern '{pattern}' - one of: {', '.join(TEST_PATTERNS)}")
+        self._check_lock(False, force)
+        self._cancel_timer()
+        out = self.settings.section("output")
+        name = self.settings.section("fleet").get("screen_name") or hostname()
+        title = TEST_PATTERNS[pattern][1]
+        text = (f"{name}  ·  {out['canvas_width']}×{out['canvas_height']} @ {out['framerate']} fps"
+                f"  ·  {title}") if label else None
+        clip = self.engine.play_pattern(pattern, self._fade(transition_ms), text, tone)
+        self.state = dict(self._blank_state("test"), clip=clip, started=time.time(), after="hold",
+                          media={"id": f"pattern:{pattern}", "name": f"Test pattern: {title}",
+                                 "kind": "pattern", "category": None, "duration": None},
+                          pattern={"name": pattern, "tone": tone, "label": label})
+        self._log_history()
+        self._notify("play")
+        return self.status()
+
     def black(self, transition_ms: Optional[int] = None) -> Dict[str, Any]:
         self._cancel_timer()
         self.engine.black(self._fade(transition_ms))
@@ -233,6 +257,10 @@ class Controller:
     def _replay_current(self, transition_ms: int = 0, duration: Optional[float] = None) -> None:
         st = self.state
         if not st.get("media"):
+            return
+        if st.get("pattern"):
+            p = st["pattern"]
+            self.test_pattern(p["name"], p.get("tone", False), p.get("label", True), transition_ms, True)
             return
         try:
             self.play(st["media"]["id"], loop=st["loop"], after=st["after"], duration=duration,

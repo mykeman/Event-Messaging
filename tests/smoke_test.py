@@ -187,7 +187,23 @@ def main():
         c.delete(f"/api/media/{bad['id']}")
         c.delete(f"/api/media/{r['id']}")
 
+        # --- test patterns ---
+        pats = c.get("/api/test").json()
+        check("smpte" in pats and "smpte-hd" in pats, "test pattern list")
+        st = c.get("/api/test/smpte", params={"tone": 1}).json()
+        check(st["mode"] == "test" and st["media"]["kind"] == "pattern" and st["pattern"]["tone"],
+              f"SMPTE bars with tone ({st['mode']})")
+        check(c.get("/api/test/nosuch").status_code == 404, "unknown pattern rejected")
+        c.get("/api/cue/107")
+        check(c.get("/api/test/smpte").status_code == 409, "test pattern blocked by locked scenario")
+        check(c.get("/api/test/smpte", params={"force": 1}).json()["mode"] == "test", "force shows it anyway")
+        st = c.get("/api/test/off").json()
+        check(st["mode"] == "default", "TEST off returns to normal")
+
         # --- TCP ---
+        out = tcp(["TEST checkers NOLABEL", "TEST OFF"])
+        check(out[0].startswith("OK mode=test") and "kind=pattern" in out[0], f"tcp TEST pattern {out[:1]}")
+        check(any(l.startswith("OK mode=default") for l in out[1:]), "tcp TEST OFF")
         out = tcp(["PING", "CUE 1", "STATUS", "PLAY \"Welcome Slide\" HOLD", "BLACK FADE=0",
                    "BOGUS", "CUE 107", "CUE 1", "NORMAL"])
         check(out[0] == "PONG", "tcp ping")
@@ -251,6 +267,11 @@ def main():
         check(out[0].startswith("OK gcue=10 ok=1"), f"master tcp gcue {out[:1]}")
         check(any(l.startswith("OK target=east action=black ok=1") for l in out), "master tcp target")
         check(any(l.startswith("STATUS screen=east-led online=1") for l in out), "master tcp status")
+        out = tcp(["ALL TEST smpte-hd TONE", "east TEST OFF"], port=M_TCP)
+        check(out[0].startswith("OK target=all action=test ok=1"), f"master tcp test pattern {out[:1]}")
+        r = m.post("/api/target/group:east/test/ball", json={"tone": False}).json()
+        check(r["ok"] == 1 and c.get("/api/status").json()["media"]["id"] == "pattern:ball",
+              "master http test pattern on a group")
 
         # deleting on master removes from player
         m.delete(f"/api/media/{mitem['id']}")

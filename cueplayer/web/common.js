@@ -1,6 +1,12 @@
 /* Shared helpers for the player and master GUIs. No external dependencies. */
 "use strict";
 
+const TEST_PATTERNS = [["smpte", "SMPTE bars"], ["smpte-hd", "SMPTE HD bars (RP 219)"], ["smpte75", "SMPTE 75% bars"],
+  ["smpte100", "SMPTE 100% bars"], ["checkers", "Checkerboard (8 px)"], ["checkers1", "Checkerboard (1 px)"],
+  ["gradient", "Gradient"], ["white", "White"], ["red", "Red"], ["green", "Green"], ["blue", "Blue"], ["black", "Black"],
+  ["ball", "Moving ball (motion / cadence)"]];
+
+
 const TOKEN_KEY = "cueplayer.token";
 
 function getToken() { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; } }

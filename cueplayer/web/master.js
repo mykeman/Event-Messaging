@@ -125,12 +125,16 @@ function renderGcueButtons() {
 
 function actionRow(a = {}) {
   const tg = el("select", { class: "a-target" }, ...targetOptions().map(([v, l]) => el("option", { value: v, selected: v === (a.target || "all") }, l)));
-  const act = el("select", { class: "a-action" }, ...["cue", "play", "normal", "black", "next"].map(v => el("option", { value: v, selected: v === (a.action || "cue") }, v)));
+  const act = el("select", { class: "a-action" }, ...["cue", "play", "normal", "black", "next", "test"].map(v => el("option", { value: v, selected: v === (a.action || "cue") }, v)));
   const ref = el("input", { class: "a-ref", value: a.ref || "", placeholder: "cue # / media", list: "media-list-dl" });
   const after = el("select", { class: "a-after" }, ...[["", "(cue default)"], ["default", "then default"], ["hold", "then hold"], ["black", "then black"]].map(([v, l]) =>
     el("option", { value: v, selected: v === (a.after || "") }, l)));
   const loop = el("input", { type: "checkbox", class: "a-loop", checked: !!a.loop });
-  const sync = () => { const needs = ["cue", "play"].includes(act.value); ref.disabled = !needs; after.disabled = !needs; loop.disabled = !needs; };
+  const sync = () => {
+    const needs = ["cue", "play"].includes(act.value);
+    ref.disabled = !(needs || act.value === "test"); after.disabled = !needs; loop.disabled = !needs;
+    ref.placeholder = act.value === "test" ? "pattern, e.g. smpte" : "cue # / media";
+  };
   act.addEventListener("change", sync); sync();
   return el("tr", {}, el("td", {}, tg), el("td", {}, act), el("td", {}, ref), el("td", {}, after),
     el("td", {}, el("label", { class: "check small" }, loop, "loop")),
@@ -318,6 +322,8 @@ async function init() {
     { loop: $("#t-loop").checked, after: $("#t-hold").checked ? "hold" : "default" });
   $("#t-default").onclick = () => sendTarget("normal");
   $("#t-black").onclick = () => sendTarget("black");
+  $("#t-pattern").replaceChildren(...TEST_PATTERNS.map(([v, l]) => el("option", { value: v }, l)));
+  $("#t-test").onclick = () => sendTarget("test", $("#t-pattern").value, { tone: $("#t-tone").checked });
   $("#screen-add").onclick = () => editScreen(null);
   $("#quick-add").onsubmit = async e => {
     e.preventDefault();

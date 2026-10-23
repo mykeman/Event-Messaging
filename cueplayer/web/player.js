@@ -486,6 +486,9 @@ async function init() {
 
   $("#btn-default").onclick = () => api("POST", "/api/default");
   $("#btn-black").onclick = () => api("POST", "/api/black");
+  $("#tp-pattern").replaceChildren(...TEST_PATTERNS.map(([v, l]) => el("option", { value: v }, l)));
+  $("#tp-show").onclick = () => api("POST", "/api/test/" + $("#tp-pattern").value,
+    { tone: $("#tp-tone").checked, label: $("#tp-label").checked });
   $("#btn-next").onclick = () => api("POST", "/api/next");
   $("#quick-filter").oninput = renderQuick;
   $("#lib-filter").oninput = renderLibrary;

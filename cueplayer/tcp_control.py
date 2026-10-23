@@ -212,12 +212,21 @@ def player_handler(ctrl) -> Handler:
             st = ctrl.play_default(parse_opts(args).get("transition_ms"))
         elif cmd == "BLACK":
             st = ctrl.black(parse_opts(args).get("transition_ms"))
+        elif cmd == "TEST":
+            name = args[0] if args and "=" not in args[0] and args[0].upper() not in (
+                "TONE", "NOLABEL", "FORCE") else "smpte"
+            if name.lower() in ("off", "stop", "clear"):
+                st = ctrl.play_default()
+            else:
+                flags = {a.upper() for a in args}
+                st = ctrl.test_pattern(name, "TONE" in flags, "NOLABEL" not in flags,
+                                       force="FORCE" in flags)
         elif cmd == "NEXT":
             st = ctrl.next(bool(parse_opts(args).get("force")))
         elif cmd == "STATUS":
             return status_line(ctrl.status())
         elif cmd == "HELP":
-            return "OK commands: PING AUTH CUE PLAY NORMAL BLACK NEXT STATUS EVENTS ON|OFF (opts: LOOP HOLD FORCE)"
+            return "OK commands: PING AUTH CUE PLAY NORMAL BLACK NEXT TEST STATUS EVENTS ON|OFF (opts: LOOP HOLD FORCE)"
         else:
             return f"ERR unknown command {cmd}"
         return status_line(st, "OK")

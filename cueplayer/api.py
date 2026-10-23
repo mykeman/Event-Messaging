@@ -110,6 +110,21 @@ def create_player_app(ctrl: Controller) -> FastAPI:
             overrides["after"] = o["after"]
         return run(ctrl.play_cue, ref, **overrides)
 
+    @app.get("/api/test", dependencies=[api])
+    def test_patterns():
+        from .engine import TEST_PATTERNS
+        return {k: v[1] for k, v in TEST_PATTERNS.items()}
+
+    @app.api_route("/api/test/{pattern}", methods=["GET", "POST"], dependencies=[api])
+    async def test_pattern(pattern: str, p: Dict[str, Any] = Depends(params)):
+        """Test pattern on every output until the next command. ?tone=1 adds a 1 kHz tone,
+        ?label=0 hides the screen name / canvas size caption."""
+        if pattern.lower() in ("off", "stop", "clear"):
+            return ctrl.play_default()
+        return run(ctrl.test_pattern, pattern, as_bool(p.get("tone", False)),
+                   as_bool(p.get("label", True)), as_int(p.get("transition")),
+                   as_bool(p.get("force", False)))
+
     @app.api_route("/api/stop", methods=["GET", "POST"], dependencies=[api])
     async def stop(p: Dict[str, Any] = Depends(params)):
         return ctrl.stop(as_int(p.get("transition")))

@@ -34,7 +34,7 @@ from .tcp_control import parse_opts, q, status_line
 
 log = logging.getLogger("cueplayer.master")
 
-ACTIONS = ("cue", "play", "stop", "default", "normal", "black", "next")
+ACTIONS = ("cue", "play", "stop", "default", "normal", "black", "next", "test")
 MANAGED_TAG = "master"
 
 
@@ -190,6 +190,8 @@ class Fleet:
         screens = self.resolve_target(target)
         if not screens:
             raise HTTPException(404, f"no enabled screens match target '{target}'")
+        if action == "test" and not ref:
+            ref = "smpte"
         if action in ("cue", "play") and not ref:
             raise HTTPException(400, f"{action} needs a cue number or media reference")
         body = {k: v for k, v in (opts or {}).items() if v is not None}
@@ -462,6 +464,9 @@ def create_master_app(fleet: Fleet) -> FastAPI:
             o["transition_ms"] = as_int(t)
         if "force" in p:
             o["force"] = as_bool(p["force"])
+        for k in ("tone", "label"):  # test patterns
+            if k in p:
+                o[k] = as_bool(p[k])
         return o
 
     @app.api_route("/api/target/{target}/{action}", methods=["GET", "POST"], dependencies=[api])
@@ -668,6 +673,19 @@ def master_handler(fleet: Fleet):
         action = tokens[0].lower()
         if action not in ACTIONS:
             return f"ERR unknown command {tokens[0]}"
+        flags = {t.upper() for t in tokens[1:]}
+        if action == "test":
+            # TEST [pattern] [TONE] [NOLABEL]
+            name = tokens[1] if len(tokens) > 1 and tokens[1].upper() not in ("TONE", "NOLABEL", "FORCE") else "smpte"
+            opts = {"tone": "TONE" in flags, "label": "NOLABEL" not in flags}
+            if "FORCE" in flags:
+                opts["force"] = True
+            try:
+                r = await fleet.command(target, "normal" if name.lower() == "off" else "test",
+                                        None if name.lower() == "off" else name, opts)
+            except HTTPException as e:
+                return f"ERR {e.detail}"
+            return f"OK target={q(target)} action=test ok={r['ok']} failed={r['failed']}"
         ref = tokens[1] if action in ("cue", "play") and len(tokens) > 1 else None
         rest = tokens[2:] if ref else tokens[1:]
         try:

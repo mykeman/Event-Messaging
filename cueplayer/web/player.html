@@ -45,6 +45,13 @@
           <button class="big" id="btn-next" title="Skip to next item">Next</button>
           <button class="big danger" id="btn-black" title="Fade to black">Black</button>
         </div>
+        <div class="row" style="margin-top:10px">
+          <span class="small muted">Test pattern</span>
+          <select id="tp-pattern" style="flex:1; min-width:160px"></select>
+          <label class="check small" title="1 kHz line-up tone at -20 dBFS"><input type="checkbox" id="tp-tone"> Tone</label>
+          <label class="check small" title="Screen name and canvas size along the bottom"><input type="checkbox" id="tp-label" checked> Label</label>
+          <button id="tp-show">Show</button>
+        </div>
         <div class="row small muted" style="margin-top:12px; gap:16px">
           <span>NDI: <span id="st-ndi">—</span></span>
           <span>Display: <span id="st-display">—</span></span>

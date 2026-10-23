@@ -298,6 +298,27 @@ A single always-running GStreamer pipeline renders the canvas. A live background
 
 Back up this directory to back up a unit.
 
+## Test patterns
+
+The Live tab has a **Test pattern** picker. The patterns are:
+
+- SMPTE bars: standard, HD (RP 219), 75% and 100%
+- checkerboard (8 px and 1 px)
+- gradient
+- solid white, red, green, blue and black
+- a moving ball for checking motion and frame cadence
+
+Each pattern is generated at the exact canvas size, so every pixel of the LED map is used, and goes to HDMI, NDI and the preview. The optional caption along the bottom shows the screen's name and canvas size, so during LED mapping you can tell which screen is which. *Tone* adds a 1 kHz line-up tone at −20 dBFS (it needs Audio on). The pattern stays up until the next command, such as **Normal**. A locked scenario blocks it unless forced.
+
+```
+GET /api/test                        list of patterns
+GET /api/test/smpte?tone=1&label=0   show one          GET /api/test/off   back to normal
+TCP:  TEST smpte-hd TONE   |   TEST checkers NOLABEL   |   TEST OFF
+Master:  ALL TEST smpte   |   GROUP main TEST ball   |   GET /api/target/all/test/smpte
+```
+
+On the master, the Screens tab toolbar has the same picker, sending to the selected target. Global cues can include a *test* action.
+
 ## Audio
 
 Turn on **Settings → Audio**; it is off by default. With *Sink* on `auto` and *ALSA device* left blank, a Raspberry Pi sends sound out of the **same HDMI port as the video** (`hdmi:CARD=vc4hdmi0` or `vc4hdmi1`). Without this, ALSA's default is the first HDMI port or the headphone jack. To use a different output, set *ALSA device*, for example `hw:CARD=Headphones` for the headphone jack, or a USB or Dante AVIO adapter. List the devices with `aplay -L`. The Live tab's *Audio* status shows which device is in use.

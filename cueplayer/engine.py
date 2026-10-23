@@ -157,6 +157,25 @@ def cadence_ok(fps: float, refresh: float) -> bool:
     return round(ratio) >= 1 and abs(ratio - round(ratio)) < 0.01
 
 
+# Test patterns: name -> (videotestsrc pattern nick, label). Generated at the exact canvas
+# size, so every pixel of the LED map is exercised.
+TEST_PATTERNS: Dict[str, Tuple[str, str]] = {
+    "smpte": ("smpte", "SMPTE bars"),
+    "smpte-hd": ("smpte-rp-219", "SMPTE HD bars (RP 219)"),
+    "smpte75": ("smpte75", "SMPTE 75% bars"),
+    "smpte100": ("smpte100", "SMPTE 100% bars"),
+    "checkers": ("checkers-8", "Checkerboard (8 px)"),
+    "checkers1": ("checkers-1", "Checkerboard (1 px)"),
+    "gradient": ("gradient", "Gradient"),
+    "white": ("white", "White"),
+    "red": ("red", "Red"),
+    "green": ("green", "Green"),
+    "blue": ("blue", "Blue"),
+    "black": ("black", "Black"),
+    "ball": ("ball", "Moving ball (motion / cadence)"),
+}
+
+
 def parse_colour(hex_colour: str) -> int:
     """'#rrggbb' -> 0xAARRGGBB as used by videotestsrc."""
     h = (hex_colour or "#000000").lstrip("#")
@@ -187,6 +206,11 @@ class BaseEngine:
         raise NotImplementedError
 
     def black(self, fade_ms: int) -> None: ...
+
+    def play_pattern(self, pattern: str, fade_ms: int, label: Optional[str] = None,
+                     tone: bool = False) -> int:
+        """Show a test pattern (TEST_PATTERNS key) on the whole canvas."""
+        raise NotImplementedError
 
     def preview_jpeg(self) -> Optional[bytes]:
         return self._preview
@@ -268,6 +292,14 @@ class MockEngine(BaseEngine):
         for t in self._timers.values():
             t.cancel()
         self._timers.clear()
+
+    def play_pattern(self, pattern, fade_ms, label=None, tone=False):
+        cid = next(self._ids)
+        for t in self._timers.values():
+            t.cancel()
+        self._timers.clear()
+        threading.Timer(0.05, lambda: self._emit(type="clip_started", clip=cid)).start()
+        return cid
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +416,11 @@ class GstEngine(BaseEngine):
     def play(self, path, kind, scale_mode, fade_ms, duration_hint=0, sw_decode=False):
         cid = next(self._ids)
         self._idle(self._play, cid, path, kind, scale_mode, fade_ms, sw_decode)
+        return cid
+
+    def play_pattern(self, pattern, fade_ms, label=None, tone=False):
+        cid = next(self._ids)
+        self._idle(self._play, cid, pattern, "pattern", "stretch", fade_ms, False, label, tone)
         return cid
 
     def black(self, fade_ms):
@@ -872,24 +909,30 @@ class GstEngine(BaseEngine):
             return 0
         return max(0, clock.get_time() - self.pipeline.get_base_time())
 
-    def _play(self, cid, path, kind, scale_mode, fade_ms, sw_decode=False) -> None:
+    def _play(self, cid, path, kind, scale_mode, fade_ms, sw_decode=False,
+              label: Optional[str] = None, tone: bool = False) -> None:
         if self.pipeline is None:
             self._emit(type="clip_error", clip=cid, error="pipeline not running")
             return
         out = self.settings["output"]
         fps = int(out["framerate"])
-        use_audio = self.amix is not None and kind == "video"
+        pattern = kind == "pattern"
+        use_audio = self.amix is not None and (kind == "video" or (pattern and tone))
 
         b = Gst.Bin.new(f"clip{cid}")
         clip = _Clip(cid, b, kind, scale_mode, fade_ms)
         clip.path = path
-        src = self._make("uridecodebin", uri=Path(path).absolute().as_uri())
-        if sw_decode:
+        if pattern:
+            src = self._pattern_source(b, path, label, out)
+        else:
+            src = self._make("uridecodebin", uri=Path(path).absolute().as_uri())
+        if sw_decode and not pattern:
             # GST_AUTOPLUG_SELECT_SKIP (2) for hardware decoders, TRY (0) for the rest
             hw = set(HW_DECODERS)
             src.connect("autoplug-select",
                         lambda _b, _p, _c, f: 2 if f.get_name() in hw else 0)
-        b.add(src)
+        if not pattern:
+            b.add(src)
         self._own(src.get_name(), cid)
 
         # video chain
@@ -907,6 +950,8 @@ class GstEngine(BaseEngine):
             a.link(c)
         clip.vghost = Gst.GhostPad.new("vsrc", vq.get_static_pad("src"))
         b.add_pad(clip.vghost)
+        if pattern:
+            src.link(vconv)
 
         achain = []
         if use_audio:
@@ -919,6 +964,10 @@ class GstEngine(BaseEngine):
                 a.link(c)
             clip.aghost = Gst.GhostPad.new("asrc", achain[-1].get_static_pad("src"))
             b.add_pad(clip.aghost)
+            if pattern:  # 1 kHz line-up tone at -20 dBFS
+                tsrc = self._make("audiotestsrc", wave=0, freq=1000.0, volume=0.1)
+                b.add(tsrc)
+                tsrc.link(achain[0])
 
         linked = {"video": False, "audio": False}
 
@@ -952,8 +1001,9 @@ class GstEngine(BaseEngine):
                 self.status["video_decoder"] = f.get_name()
 
         b.connect("deep-element-added", on_element)
-        src.connect("pad-added", on_pad)
-        src.connect("no-more-pads", no_more_pads)
+        if not pattern:
+            src.connect("pad-added", on_pad)
+            src.connect("no-more-pads", no_more_pads)
 
         # Hold the new clip invisible until its first frame arrives
         self.pipeline.add(b)
@@ -1012,6 +1062,26 @@ class GstEngine(BaseEngine):
 
         self.clips[cid] = clip
         b.sync_state_with_parent()
+
+    def _pattern_source(self, b, name: str, label: Optional[str], out: Dict[str, Any]):
+        """videotestsrc at the canvas size (+ optional text label) as the clip's source.
+        Adds its elements to bin b and returns the last one."""
+        nick = TEST_PATTERNS.get(name, TEST_PATTERNS["smpte"])[0]
+        src = self._make("videotestsrc")
+        Gst.util_set_object_arg(src, "pattern", nick)
+        cw, ch, fps = int(out["canvas_width"]), int(out["canvas_height"]), int(out["framerate"])
+        els = [src, self._caps(f"video/x-raw,width={cw},height={ch},framerate={fps}/1")]
+        if label and self._has("textoverlay"):
+            txt = self._make("textoverlay", text=label, shaded_background=True,
+                             font_desc=f"Sans Bold {max(10, ch // 30)}px")
+            Gst.util_set_object_arg(txt, "valignment", "bottom")
+            Gst.util_set_object_arg(txt, "halignment", "left")
+            els.append(txt)
+        for el in els:
+            b.add(el)
+        for a, c in zip(els, els[1:]):
+            a.link(c)
+        return els[-1]
 
     def _clip_started(self, clip: _Clip) -> None:
         if clip.dying or clip.id not in self.clips:
