@@ -50,6 +50,10 @@ sleep 3
 if systemctl is-active --quiet cueplayer.service; then
   rm -rf "$PREFIX/cueplayer.old"
   echo "==> Updated and running. Logs: journalctl -u cueplayer -f"
+  if gst-inspect-1.0 ndisink >/dev/null 2>&1 && ! systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+    echo "!! NDI is installed but avahi-daemon isn't running, so NDI viewers can't find this unit:"
+    echo "   sudo apt install -y avahi-daemon && sudo systemctl enable --now avahi-daemon"
+  fi
 else
   echo "!! Service failed to start - rolling back"
   journalctl -u cueplayer -n 30 --no-pager || true

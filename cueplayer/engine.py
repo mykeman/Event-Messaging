@@ -181,6 +181,42 @@ def display_accepts_audio(port: Optional[str], drm: str = "/sys/class/drm") -> O
     return None
 
 
+def eld_alsa_device(asound: str = "/proc/asound") -> Optional[Tuple[str, str]]:
+    """(ALSA device, screen name) for the HDMI/DP output whose screen reports audio support
+    (ELD valid), on cards like Intel/AMD HDA where several HDMI PCMs share one card.
+
+    The kernel names a connected HDMI PCM after the screen ("HDMI 0" becomes "Display"),
+    so the ELD's monitor_name identifies the PCM device; plughw handles format conversion.
+    """
+    root = Path(asound)
+    for card in sorted(root.glob("card[0-9]*")):
+        names = []
+        for eld in sorted(card.glob("eld#*")):
+            try:
+                info = dict(line.split(None, 1) for line in eld.read_text().splitlines()
+                            if len(line.split(None, 1)) == 2)
+            except OSError:
+                continue
+            if info.get("monitor_present", "").strip() == "1" and info.get("eld_valid", "").strip() == "1":
+                names.append(info.get("monitor_name", "").strip())
+        if not names:
+            continue
+        try:
+            card_id = card.joinpath("id").read_text().strip()
+        except OSError:
+            continue
+        for pcm in sorted(card.glob("pcm*p")):
+            try:
+                info = pcm.joinpath("info").read_text()
+            except OSError:
+                continue
+            m = re.search(r"^name:\s*(.+)$", info, re.M)
+            dev = re.search(r"^device:\s*(\d+)$", info, re.M)
+            if m and dev and m.group(1).strip() in names and names[0]:
+                return f"plughw:CARD={card_id},DEV={dev.group(1)}", m.group(1).strip()
+    return None
+
+
 def audio_server_running() -> bool:
     """A PipeWire/PulseAudio server this process can use (desktop sessions)."""
     run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
@@ -884,10 +920,16 @@ class GstEngine(BaseEngine):
         self._audio_note = "on"
         if kind != "none":
             device = audio.get("device") or ""
-            hdmi = hdmi_alsa_device(self._display_port)
+            hdmi = hdmi_alsa_device(self._display_port)   # Pi: one card per HDMI port
+            hdmi_note = f"follows video on {self._display_port}" if hdmi else ""
+            if not hdmi:
+                found = eld_alsa_device()                    # Intel/AMD: the port with a screen
+                if found:
+                    hdmi, hdmi_note = found[0], f"HDMI to screen '{found[1]}'"
             if kind == "auto" and not audio_server_running() and (device or hdmi):
                 kind = "alsa"  # no desktop sound server: talk to ALSA directly
-            if kind == "alsa" and not device and hdmi and display_accepts_audio(self._display_port) is False:
+            if kind == "alsa" and not device and hdmi and hdmi.startswith("hdmi:CARD=vc4") \
+                    and display_accepts_audio(self._display_port) is False:
                 # vc4 refuses to open HDMI audio (error -524) when the display has none
                 self._audio_note = (f"off: the display on {self._display_port} doesn't accept audio "
                                     f"over HDMI (per its EDID). Use its audio input or set an ALSA device.")
@@ -901,7 +943,7 @@ class GstEngine(BaseEngine):
                 # Keep the system clock as the pipeline clock, same as without audio
                 sink.set_property("provide-clock", False)
                 self._audio_note = f"on (alsa {device or 'default'}" + (
-                    f", follows video on {self._display_port})" if device == hdmi and hdmi else ")")
+                    f", {hdmi_note})" if device == hdmi and hdmi else ")")
             elif kind == "pulse":
                 sink = self._make("pulsesink", "audio_sink")
                 self._audio_note = "on (pulse)"

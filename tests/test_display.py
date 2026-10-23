@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from cueplayer.engine import (boot_video_modes, cadence_ok, connector_snapshot, detect_display_connector,  # noqa: E402
-                              edid_has_audio, hdmi_alsa_device, newly_connected)
+                              edid_has_audio, eld_alsa_device, hdmi_alsa_device, newly_connected)
 import tempfile  # noqa: E402
 
 failures = 0
@@ -65,6 +65,23 @@ with tempfile.TemporaryDirectory() as d:
     swapped = dict(after, **{"HDMI-A-2": ("connected", 384)})
     check("a different screen (new EDID) is detected", newly_connected(after, swapped) == ["HDMI-A-2"])
     check("no change -> nothing", newly_connected(after, after) == [])
+
+# Intel HDA: pick the HDMI PCM whose screen reports audio (Giada F106D layout)
+with tempfile.TemporaryDirectory() as d:
+    card = Path(d, "card0"); card.mkdir()
+    card.joinpath("id").write_text("PCH\n")
+    for i in range(15):
+        valid = i == 3
+        card.joinpath(f"eld#2.{i}").write_text(
+            f"monitor_present\t\t{1 if valid else 0}\neld_valid\t\t{1 if valid else 0}\n"
+            + ("monitor_name\t\tDisplay\n" if valid else ""))
+    for dev, ident, name in ((0, "ALC897 Analog", "ALC897 Analog"), (1, "ALC897 Digital", "ALC897 Digital"),
+                             (3, "HDMI 0", "Display"), (7, "HDMI 1", "HDMI 1"), (8, "HDMI 2", "HDMI 2")):
+        pcm = card / f"pcm{dev}p"; pcm.mkdir()
+        pcm.joinpath("info").write_text(f"card: 0\ndevice: {dev}\nsubdevice: 0\nstream: PLAYBACK\nid: {ident}\nname: {name}\n")
+    check("Intel: HDMI PCM of the screen with valid ELD", eld_alsa_device(d) == ("plughw:CARD=PCH,DEV=3", "Display"), eld_alsa_device(d))
+    card.joinpath("eld#2.3").write_text("monitor_present\t\t0\neld_valid\t\t0\n")
+    check("Intel: no screen reporting audio -> None", eld_alsa_device(d) is None)
 
 # HDMI audio follows the video port on a Pi
 PI_CARDS = """ 0 [vc4hdmi0       ]: vc4-hdmi - vc4-hdmi-0

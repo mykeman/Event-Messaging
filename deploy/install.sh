@@ -98,7 +98,8 @@ echo "==> Installing CuePlayer ($ROLE) from $SRC to $PREFIX"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-PKGS=(python3 python3-venv python3-pip ffmpeg ca-certificates curl)
+PKGS=(python3 python3-venv python3-pip ffmpeg ca-certificates curl
+      avahi-daemon)  # mDNS: NDI discovery on Linux needs it; also gives <host>.local names
 if [[ "$ROLE" == player ]]; then
   PKGS+=(python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0
          gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good

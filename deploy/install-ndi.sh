@@ -21,6 +21,14 @@ ARCH=$(uname -m)
 GST_VER=$(pkg-config --modversion gstreamer-1.0 2>/dev/null || gst-inspect-1.0 --version | awk '/GStreamer/{print $2; exit}')
 echo "==> GStreamer $GST_VER on $ARCH"
 
+# NDI on Linux announces sources through avahi (mDNS). Raspberry Pi OS ships it; Ubuntu
+# Server and minimal Debian don't, and then NDI viewers never see this unit.
+if ! systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+  echo "==> Installing avahi-daemon (NDI discovery)"
+  apt-get install -y --no-install-recommends avahi-daemon
+  systemctl enable --now avahi-daemon
+fi
+
 if gst-inspect-1.0 ndisink >/dev/null 2>&1 && ldconfig -p | grep -q libndi.so; then
   echo "==> ndisink and libndi already installed - nothing to do"; exit 0
 fi

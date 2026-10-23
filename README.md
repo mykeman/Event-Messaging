@@ -50,7 +50,7 @@ The script installs GStreamer, ffmpeg and the app into `/opt/cueplayer`, with me
 1. downloads the NDI SDK for Linux (you'll be asked to accept the NDI licence), then
 2. builds the GStreamer `ndisink` plugin from gst-plugins-rs. The build takes about 5 minutes on x86 and 20–40 minutes on a Pi.
 
-You can skip NDI and add it later. The player runs without it and reports `NDI: unavailable`.
+You can skip NDI and add it later. The player runs without it and reports `NDI: unavailable`. NDI on Linux finds and announces sources through **avahi** (mDNS). The installers set it up; Ubuntu Server and minimal Debian don't include it. If NDI is *on* but viewers can't see the unit, check `systemctl status avahi-daemon`.
 
 #### Dedicated display (appliance mode)
 
@@ -324,7 +324,7 @@ On the master, the Screens tab toolbar has the same picker, sending to the selec
 
 ## Audio
 
-Turn on **Settings → Audio**; it is off by default. With *Sink* on `auto` and *ALSA device* left blank, a Raspberry Pi sends sound out of the **same HDMI port as the video** (`hdmi:CARD=vc4hdmi0` or `vc4hdmi1`). Without this, ALSA's default is the first HDMI port or the headphone jack. To use a different output, set *ALSA device*, for example `hw:CARD=Headphones` for the headphone jack, or a USB or Dante AVIO adapter. List the devices with `aplay -L`. The Live tab's *Audio* status shows which device is in use.
+Turn on **Settings → Audio**; it is off by default. With *Sink* on `auto` and *ALSA device* left blank, a Raspberry Pi sends sound out of the **same HDMI port as the video** (`hdmi:CARD=vc4hdmi0` or `vc4hdmi1`). On Intel/AMD PCs, where all HDMI outputs share one sound card, the player uses the HDMI output whose screen reports audio support (its ELD), for example `plughw:CARD=PCH,DEV=3`. Without this, ALSA's default is the first HDMI port or the headphone jack. To use a different output, set *ALSA device*, for example `hw:CARD=Headphones` for the headphone jack, or a USB or Dante AVIO adapter. List the devices with `aplay -L`. The Live tab's *Audio* status shows which device is in use.
 
 ## Status / known limitations
 
