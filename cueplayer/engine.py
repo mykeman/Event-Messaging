@@ -1038,7 +1038,7 @@ class GstEngine(BaseEngine):
             clip.aghost = Gst.GhostPad.new("asrc", achain[-1].get_static_pad("src"))
             b.add_pad(clip.aghost)
             if pattern:  # 1 kHz line-up tone at -20 dBFS
-                tsrc = self._make("audiotestsrc", wave=0, freq=1000.0, volume=0.1, is_live=True)
+                tsrc = self._make("audiotestsrc", wave=0, freq=1000.0, volume=0.1)
                 b.add(tsrc)
                 tsrc.link(achain[0])
 
@@ -1148,9 +1148,10 @@ class GstEngine(BaseEngine):
         """videotestsrc at the canvas size (+ optional text label) as the clip's source.
         Adds its elements to bin b and returns the last one."""
         nick = TEST_PATTERNS.get(name, TEST_PATTERNS["smpte"])[0]
-        # Live: frames are made in real time, like a camera, rather than as fast as the
-        # pipeline accepts them (which is how files behave)
-        src = self._make("videotestsrc", is_live=True)
+        # Not live: frames are made when the compositor takes them, so the pattern runs at
+        # exactly the canvas rate. (A live source drifted against the compositor and
+        # delivered 25 of 30 fps; the earlier freeze was QoS dropping, now disabled.)
+        src = self._make("videotestsrc")
         Gst.util_set_object_arg(src, "pattern", nick)
         cw, ch, fps = int(out["canvas_width"]), int(out["canvas_height"]), int(out["framerate"])
         els = [src, self._caps(f"video/x-raw,width={cw},height={ch},framerate={fps}/1")]
