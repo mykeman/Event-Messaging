@@ -757,6 +757,10 @@ class GstEngine(BaseEngine):
         self.comp = self._make("compositor", "comp", background=1)
         if self.comp.find_property("ignore-inactive-pads"):
             self.comp.set_property("ignore-inactive-pads", True)
+        # Wait this long for a clip frame that's running late (e.g. two decoders busy during
+        # a change) instead of drawing the background for it - that showed as black frames
+        if self.comp.find_property("latency"):
+            self.comp.set_property("latency", int(out.get("latency_ms", 100)) * Gst.MSECOND)
         tee = self._make("tee", "vtee", allow_not_linked=True)
         # Compose in NV12: hardware decoders (Pi V4L2, VA-API) produce it and display planes
         # (Intel, Pi vc4) scan it out directly, so the HDMI path needs no per-frame
@@ -860,7 +864,9 @@ class GstEngine(BaseEngine):
         display time - the pipeline latency, which grows to ~1/3 s with an audio sink - so it
         must hold that much time. A 3-frame limit dropped half the frames without audio and
         most of them with audio on. Still leaky, so a stuck output can't stall the others."""
-        ms = int(self.settings["output"].get("latency_ms", 100)) + 400
+        # latency budget is used twice (compositor wait + sink processing deadline), plus
+        # the audio sink's buffer and headroom
+        ms = 2 * int(self.settings["output"].get("latency_ms", 100)) + 400
         return self._make("queue", leaky=2, max_size_buffers=0, max_size_bytes=0,
                           max_size_time=ms * Gst.MSECOND)
 
@@ -1279,7 +1285,18 @@ class GstEngine(BaseEngine):
             b.add(el)
         for a, c in zip(vchain, vchain[1:]):
             a.link(c)
-        clip.vghost = Gst.GhostPad.new("vsrc", vq.get_static_pad("src"))
+        vout = vq
+        if kind == "video":
+            # Gap filler: a frame that's missing (late, or dropped as green/corrupt) is
+            # replaced by a repeat of the previous one rather than leaving a hole
+            rate = self._make("videorate", skip_to_first=True)
+            for prop, val in (("qos", False), ("max-duplication-time", 500 * Gst.MSECOND)):
+                if rate.find_property(prop):
+                    rate.set_property(prop, val)
+            b.add(rate)
+            vq.link(rate)
+            vout = rate
+        clip.vghost = Gst.GhostPad.new("vsrc", vout.get_static_pad("src"))
         b.add_pad(clip.vghost)
         if pattern:
             src.link(vconv)
@@ -1362,7 +1379,9 @@ class GstEngine(BaseEngine):
         def bad_frame(pad, buf) -> bool:
             if buf.get_flags() & Gst.BufferFlags.CORRUPTED:
                 return True
-            if clip.checked >= self.BLANK_CHECK_FRAMES:
+            # Check the start of every clip, and every clip while another is starting (two
+            # decoders at once is when damaged frames appear in the one already on screen)
+            if clip.checked >= self.BLANK_CHECK_FRAMES and len(self.clips) <= 1:
                 return False
             clip.checked += 1
             caps = pad.get_current_caps()
