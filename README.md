@@ -259,6 +259,15 @@ A player can send its audio mix (video soundtracks) straight to Q-SYS as an AES6
 
 ---
 
+
+#### Network interface and ST 2110-30
+
+- **Interface:** *Settings → AES67 / ST 2110-30 → Network interface* lists the unit's ports with their addresses (on a Giada F106D, its two Ethernet ports). The audio, its PTP timing and its SAP announcements all use the chosen port, so you can keep media on a dedicated AV network. GStreamer can only start PTP once per run, so after changing the interface on a running stream, restart the service (`sudo systemctl restart cueplayer`). The status line says so if that's needed.
+- **Profile `st2110-30`:** for SMPTE ST 2110 systems. It defaults the PTP domain to 127 (the ST 2059-2 default; still editable), adds `a=fmtp:<pt> channel-order=SMPTE2110.(ST)` (or `(M)` for mono) to the SDP, and drops the AES67/RAVENNA-only `a=clock-domain` line. Use a 1 ms packet time for ST 2110-30 Level A, or 0.125 ms for Level C receivers.
+- **RTP payload type:** 96–127, for receivers that expect a specific value.
+
+The media DSCP (default 34, AF41) and TTL are configurable for both profiles.
+
 ## Upload and conversion progress
 
 While anything is uploading, converting or being sent to screens, an **Activity** panel appears in the bottom-left corner of the web GUI on every tab. Each upload shows its progress, then *Processing on the unit…* while the player checks the file. Each conversion shows its target format, a progress bar, its speed (for example 1.4× real time) and the time left. On the master, each screen being sent media shows the file count. The panel can be collapsed, and it clears itself when the work is done.

@@ -56,6 +56,9 @@ DEFAULTS: Dict[str, Any] = {
         # Native AES67 / SMPTE 2110-30 audio output (RTP multicast, PTP-locked). Needs audio
         # enabled. Off by default; untested on real AES67 hardware - see README.
         "enabled": False,
+        # aes67 | st2110-30 (ST 2110 receivers: PTP domain 127 by default, SDP channel-order)
+        "profile": "aes67",
+        "payload_type": 96,     # RTP payload type, 96-127
         "multicast": "",        # blank = 239.69.<c>.<d> from this unit's a.b.c.d
         "port": 5004,
         "channels": 2,          # 1 or 2 (the player mix is stereo)

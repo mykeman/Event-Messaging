@@ -25,11 +25,13 @@ const SETTINGS_FORM = [
     fields: [["type", "Type", "select", ["cut", "fade", "dip", "slide-left", "slide-right", "slide-up", "slide-down"]], ["duration_ms", "Duration (ms)", "number"]] },
   { section: "audio", title: "Audio", note: "Video soundtracks to HDMI and into NDI. With sink auto and ALSA device blank, sound goes out of the same HDMI port as the video. Set a device (e.g. hw:CARD=Headphones) to send it elsewhere.",
     fields: [["enabled", "Enabled", "check"], ["sink", "Sink", "select", ["auto", "alsa", "pulse", "none"]], ["device", "ALSA device", "text"]] },
-  { section: "aes67", title: "AES67 audio output", note: "Sends the audio mix as an AES67 multicast stream, locked to PTP, for Q-SYS and other AES67 receivers. Needs Audio enabled. Blank multicast = 239.69.x.y from this unit's address.",
-    fields: [["enabled", "Enabled", "check"], ["sap", "Announce (SAP)", "check"], ["multicast", "Multicast address", "text"], ["port", "Port", "number"],
+  { section: "aes67", title: "AES67 / ST 2110-30 audio output", note: "Sends the audio mix as an RTP multicast stream locked to PTP, for Q-SYS, Dante (AES67 mode) and ST 2110 systems. Needs Audio enabled. Blank multicast = 239.69.x.y from this unit's address. Interface: both the audio and its PTP timing use it; changing it while running needs a service restart.",
+    fields: [["enabled", "Enabled", "check"], ["sap", "Announce (SAP)", "check"],
+      ["profile", "Profile", "select", ["aes67", "st2110-30"]], ["interface", "Network interface", "iface", null, "wide"],
+      ["multicast", "Multicast address", "text"], ["port", "Port", "number"], ["payload_type", "RTP payload type", "number"],
       ["channels", "Channels", "select", [2, 1]], ["bit_depth", "Bit depth", "select", [24, 16]],
       ["ptime_ms", "Packet time (ms)", "select", [1, 0.125, 0.25, 4]], ["ptp_domain", "PTP domain", "number"],
-      ["ttl", "TTL", "number"], ["dscp", "Media DSCP", "number"], ["interface", "Interface (blank = default)", "text"],
+      ["ttl", "TTL", "number"], ["dscp", "Media DSCP", "number"],
       ["session_name", "Session name", "text", null, "wide"]] },
   { section: "preview", title: "Web preview", fields: [["enabled", "Enabled", "check"], ["fps", "FPS", "number"], ["width", "Width", "number"]] },
   { section: "control", title: "Control", note: "Port changes take effect after a service restart.",
@@ -376,6 +378,12 @@ function renderSettingsForms() {
       let input;
       const v = vals[key];
       if (type === "select") input = el("select", {}, ...opts.map(o => el("option", { value: o, selected: String(o) === String(v) }, o)));
+      else if (type === "iface") {
+        const list = (S.ifaces || []).map(i => [i.name, `${i.name} — ${i.ipv4.join(", ")}`]);
+        if (v && !list.find(([n]) => n === v)) list.push([v, `${v} (not found)`]);
+        input = el("select", {}, el("option", { value: "", selected: !v }, "Default (route to the multicast group)"),
+          ...list.map(([n, l]) => el("option", { value: n, selected: n === v }, l)));
+      }
       else if (type === "check") return el("label", { class: "check", style: { marginTop: "18px" } },
         el("input", { type: "checkbox", checked: !!v, dataset: { s: sec.section, k: key, t: type } }), label);
       else if (type === "list") input = el("input", { value: (v || []).join(", ") });
@@ -393,6 +401,12 @@ function renderSettingsForms() {
       sec.note ? el("p", { class: "small muted", style: { marginTop: 0 } }, sec.note) : null, presets, grid, status);
   }));
   $$("#settings-forms input, #settings-forms select").forEach(i => i.addEventListener("input", updateDiagram));
+  // Profile presets: ST 2110 (ST 2059-2) systems default to PTP domain 127, AES67 to 0
+  const prof = $(`#settings-forms [data-s="aes67"][data-k="profile"]`), dom = $(`#settings-forms [data-s="aes67"][data-k="ptp_domain"]`);
+  if (prof && dom) prof.addEventListener("change", () => {
+    if (prof.value === "st2110-30" && dom.value === "0") dom.value = 127;
+    if (prof.value === "aes67" && dom.value === "127") dom.value = 0;
+  });
   updateDiagram();
 }
 
@@ -488,7 +502,8 @@ async function init() {
   try {
     S.status = await api("GET", "/api/status");
     await loadSettings();
-    await Promise.all([loadMedia(), loadCues(), loadInfo()]);
+    await Promise.all([loadMedia(), loadCues(), loadInfo(),
+      api("GET", "/api/network/interfaces", undefined, { quiet: true }).then(l => { S.ifaces = l; }).catch(() => { S.ifaces = []; })]);
   } catch (e) { console.error(e); return; }
   renderDefault();
   renderSettingsForms();

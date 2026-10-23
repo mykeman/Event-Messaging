@@ -529,6 +529,7 @@ class GstEngine(BaseEngine):
         self._audio_note = "on"
         self._fail_counts: Dict[str, int] = {}
         self._ptp_init: Optional[bool] = None   # gst_ptp_init() result (it can only run once)
+        self._ptp_iface = ""                    # interface PTP was started on
         self._ptp_clocks: Dict[int, Any] = {}   # domain -> GstPtpClock
         self._ptp_timer = None
         self._ptp_waiting = False               # pipeline built without AES67 until PTP syncs
@@ -1071,6 +1072,12 @@ class GstEngine(BaseEngine):
                 none = getattr(GstNet, "PTP_CLOCK_ID_NONE", 2 ** 64 - 1)
                 # Needs gst-ptp-helper with CAP_NET_BIND_SERVICE (ports 319/320), see install.sh
                 self._ptp_init = bool(GstNet.ptp_init(none, [iface] if iface else None))
+                self._ptp_iface = iface
+        if self._ptp_init and iface != self._ptp_iface:
+            # GStreamer's PTP can only be set up once per process
+            raise RuntimeError(f"PTP is running on {self._ptp_iface or 'the default interface'}; "
+                               f"restart the CuePlayer service to move it to {iface or 'the default'} "
+                               "(sudo systemctl restart cueplayer)")
         if not self._ptp_init:
             raise RuntimeError("PTP init failed - gst-ptp-helper needs cap_net_bind_service,"
                                "cap_net_admin (sudo deploy/install.sh sets it); restart after fixing")
@@ -1138,7 +1145,7 @@ class GstEngine(BaseEngine):
         ts_offset = ((base + lat) * aes67.SAMPLE_RATE // Gst.SECOND) % (1 << 32)
 
         fmt, pay_name = ("S24BE", "rtpL24pay") if depth == 24 else ("S16BE", "rtpL16pay")
-        pay = self._make(pay_name, pt=aes67.PAYLOAD_TYPE,
+        pay = self._make(pay_name, pt=int(r.get("payload_type") or aes67.PAYLOAD_TYPE),
                          mtu=aes67.RTP_HEADER + aes67.payload_bytes(ch, depth, ptime),
                          min_ptime=ptime_ns, max_ptime=ptime_ns, ptime_multiple=ptime_ns,
                          timestamp_offset=ts_offset)

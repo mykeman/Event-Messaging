@@ -96,5 +96,25 @@ with tempfile.TemporaryDirectory() as d:
     changed = s.update({"aes67": {"enabled": True, "port": "5008"}})
     check("good update applied + normalised", changed == {"aes67"} and s.get()["aes67"]["port"] == 5008, (changed, s.get()["aes67"]))
 
+# ---- ST 2110-30 profile, payload type, interfaces ----
+r = dict(aes67.validate(dict(BASE, profile="st2110-30", ptp_domain=127, payload_type=97, ptime_ms=0.125)),
+         source_ip="10.0.0.5", multicast="239.69.0.5", session_name="LED 1 audio")
+sdp = aes67.build_sdp(r, GM)
+check("2110: rtpmap uses the chosen payload type", "a=rtpmap:97 L24/48000/2" in sdp and "RTP/AVP 97" in sdp, sdp)
+check("2110: channel-order in fmtp", "a=fmtp:97 channel-order=SMPTE2110.(ST)" in sdp, sdp)
+check("2110: ts-refclk on domain 127", f"a=ts-refclk:ptp=IEEE1588-2008:{GM}:127" in sdp, sdp)
+check("2110: 125 us packets = 6 samples", "a=ptime:0.125" in sdp and "a=framecount:6" in sdp, sdp)
+check("2110: no AES67-only clock-domain line", "a=clock-domain" not in sdp, sdp)
+mono = aes67.build_sdp(dict(r, channels=1), GM)
+check("2110 mono channel-order M", "channel-order=SMPTE2110.(M)" in mono, mono)
+a67 = aes67.build_sdp(dict(r, profile="aes67"), GM)
+check("aes67 profile keeps clock-domain, no fmtp", "a=clock-domain:PTPv2 127" in a67 and "a=fmtp" not in a67, a67)
+check("rejects unknown profile", raises(lambda: aes67.validate(dict(BASE, profile="ravenna2"))) is not None)
+check("rejects payload type outside 96-127", raises(lambda: aes67.validate(dict(BASE, payload_type=8))) is not None)
+check("old settings without new keys still validate", raises(lambda: aes67.validate(
+    {k: v for k, v in BASE.items() if k not in ("profile", "payload_type")} | {"payload_type": 96})) is None)
+ifs = aes67.list_interfaces()
+check("interface list has names and IPv4 addresses", all(i["name"] and i["ipv4"] for i in ifs), ifs)
+
 print("all passed" if not failures else f"{failures} failed")
 sys.exit(1 if failures else 0)

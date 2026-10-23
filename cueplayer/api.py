@@ -211,6 +211,12 @@ def create_player_app(ctrl: Controller) -> FastAPI:
         tc.use_original(item_id)
         return lib.get(item_id)
 
+    @app.get("/api/network/interfaces", dependencies=[api])
+    def network_interfaces():
+        """Network interfaces with IPv4 addresses (for choosing the AES67 / PTP interface)."""
+        from .aes67 import list_interfaces
+        return list_interfaces()
+
     @app.get("/api/hardware", dependencies=[api])
     def hardware():
         from .hwinfo import detect

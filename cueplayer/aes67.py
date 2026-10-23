@@ -21,7 +21,8 @@ PTIMES_MS = (0.125, 0.25, 1, 4)   # AES67 packet times; 1 ms is the one every re
 BIT_DEPTHS = (16, 24)             # L16 / L24
 SAP_GROUP, SAP_PORT = "224.2.127.254", 9875
 SAP_INTERVAL_S = 30
-PAYLOAD_TYPE = 96
+PAYLOAD_TYPE = 96                 # default dynamic RTP payload type
+PROFILES = ("aes67", "st2110-30")  # st2110-30: ST 2059-2 domain default 127, channel-order in SDP
 RTP_HEADER = 12
 
 
@@ -35,6 +36,21 @@ def iface_ip(iface: str) -> Optional[str]:
             return socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x8915, req)[20:24])  # SIOCGIFADDR
     except (ImportError, OSError):
         return None
+
+
+def list_interfaces() -> List[Dict[str, Any]]:
+    """Network interfaces with IPv4 addresses (loopback excluded), for the GUI's picker."""
+    try:
+        import ifaddr
+    except ImportError:
+        return []
+    out = []
+    for a in ifaddr.get_adapters():
+        ips = [ip.ip for ip in a.ips if isinstance(ip.ip, str) and not ip.ip.startswith("127.")]
+        name = a.name if isinstance(a.name, str) else str(a.name)
+        if ips and name != "lo":
+            out.append({"name": name, "ipv4": ips})
+    return sorted(out, key=lambda i: i["name"])
 
 
 def local_ip(dest: str = "239.69.0.1", iface: str = "") -> str:
@@ -96,6 +112,10 @@ def validate(section: Dict[str, Any]) -> Dict[str, Any]:
         out[key] = int(v) if cast is int or float(v).is_integer() else v
 
     out["enabled"] = bool(out.get("enabled"))
+    out["profile"] = str(out.get("profile") or "aes67").lower()
+    if out["profile"] not in PROFILES:
+        errors.append(f"profile must be one of {', '.join(PROFILES)}")
+    num("payload_type", int, 96, 127)
     out["sap"] = bool(out.get("sap", True))
     mc = str(out.get("multicast") or "").strip()
     if mc:
@@ -148,16 +168,19 @@ def build_sdp(cfg: Dict[str, Any], grandmaster: Optional[str], version: int = 0)
     ptime_s = f"{ptime:g}"
     refclk = (f"ptp=IEEE1588-2008:{grandmaster}:{domain}" if grandmaster
               else "ptp=IEEE1588-2008:traceable")
+    pt = int(cfg.get("payload_type") or PAYLOAD_TYPE)
+    st2110 = cfg.get("profile") == "st2110-30"
     lines = [
         "v=0",
         f"o=- {sess_id} {version} IN IP4 {src}",
         f"s={name}",
         f"c=IN IP4 {mc}/{int(cfg['ttl'])}",
         "t=0 0",
-        f"a=clock-domain:PTPv2 {domain}",
-        f"m=audio {int(cfg['port'])} RTP/AVP {PAYLOAD_TYPE}",
+    ] + ([] if st2110 else [f"a=clock-domain:PTPv2 {domain}"]) + [
+        f"m=audio {int(cfg['port'])} RTP/AVP {pt}",
         f"i={ch} channels: " + ("Left, Right" if ch == 2 else "Mono"),
-        f"a=rtpmap:{PAYLOAD_TYPE} L{depth}/{SAMPLE_RATE}/{ch}",
+        f"a=rtpmap:{pt} L{depth}/{SAMPLE_RATE}/{ch}",
+    ] + ([f"a=fmtp:{pt} channel-order=SMPTE2110.({'ST' if ch == 2 else 'M'})"] if st2110 else []) + [
         f"a=source-filter: incl IN IP4 {mc} {src}",
         "a=recvonly",
         f"a=ptime:{ptime_s}",
