@@ -516,6 +516,11 @@ class GstEngine(BaseEngine):
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_bus)
+        # Always run on the system clock. GStreamer otherwise prefers an audio sink's clock
+        # (autoaudiosink -> alsasink/pulsesink), and a sound device that plays in bursts or
+        # stalls (e.g. HDMI audio to a screen without EDID) then makes the video judder or
+        # freeze. Audio sinks slave to this clock instead. AES67 replaces it with PTP below.
+        self.pipeline.use_clock(Gst.SystemClock.obtain())
 
         # --- video core ---
         bg = self._make("videotestsrc", is_live=True, pattern=17,  # solid-color
