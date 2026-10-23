@@ -57,7 +57,8 @@ function renderStatus() {
   $("#st-decoder").textContent = eng.video_decoder ? eng.video_decoder + (/^(avdec|vp8dec|vp9dec|dav1d|openh264)/.test(eng.video_decoder) ? " (software)" : " (hardware)") : "—";
   const dropped = eng.frames_dropped || 0;
   const f = eng.fps;
-  $("#st-frames").textContent = (f ? `clip ${f.clip} · mixed ${f.composited} · HDMI ${f.display} fps` : "—") +
+  $("#st-frames").textContent = (f ? `clip ${f.clip} · mixed ${f.composited} · HDMI ${f.display} fps` +
+    (f.display_drops ? ` (${f.display_drops}/s not shown)` : "") : "—") +
     (dropped ? ` · ${dropped} dropped` : "");
   $("#st-frames").title = "Frames per second at each stage: the playing clip, the compositor, and the HDMI output. A stage at 0 while the one before is running shows where playback stalls.";
   $("#st-frames").style.color = dropped ? "var(--warn)" : "";

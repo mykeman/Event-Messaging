@@ -483,7 +483,7 @@ class GstEngine(BaseEngine):
         while the one before it is running shows where the pipeline is stuck."""
         now = dict(self._frames)
         self.status["fps"] = {k: now.get(k, 0) - self._frames_prev.get(k, 0)
-                              for k in ("clip", "composited", "display")}
+                              for k in ("clip", "composited", "display", "display_drops")}
         self._frames_prev = now
         return True
 
@@ -548,11 +548,12 @@ class GstEngine(BaseEngine):
         if self.comp.find_property("ignore-inactive-pads"):
             self.comp.set_property("ignore-inactive-pads", True)
         tee = self._make("tee", "vtee", allow_not_linked=True)
-        # Compose in I420, the format decoders produce. Decoded frames then pass through
-        # without conversion, and the compositor skips the background whenever an opaque
-        # full-canvas clip covers it. (Fades still work through the pad alpha.)
-        bgcaps = self._caps(vcaps + ",format=I420")
-        outcaps = self._caps(vcaps + ",format=I420")
+        # Compose in NV12: hardware decoders (Pi V4L2, VA-API) produce it and display planes
+        # (Intel, Pi vc4) scan it out directly, so the HDMI path needs no per-frame
+        # conversion. The compositor skips the background whenever an opaque full-canvas
+        # clip covers it. (Fades still work through the pad alpha.)
+        bgcaps = self._caps(vcaps + ",format=NV12")
+        outcaps = self._caps(vcaps + ",format=NV12")
         self._chain(bg, bgcaps)
         self.pipeline.add(self.comp)
         bgpad = self._req(self.comp)
@@ -730,7 +731,11 @@ class GstEngine(BaseEngine):
             sink.set_property("processing-deadline",
                               int(self.settings["output"].get("latency_ms", 100)) * Gst.MSECOND)
 
-        els = [self._make("queue", max_size_buffers=3, leaky=2), self._make("videoconvert")]
+        dq = self._make("queue", max_size_buffers=3, leaky=2)
+        # A leaky queue drops silently when the sink can't keep up: count it
+        dq.connect("overrun", lambda *_: self._frames.__setitem__(
+            "display_drops", self._frames.get("display_drops", 0) + 1))
+        els = [dq, self._make("videoconvert")]
         if (ow, oh) != (cw, ch):
             els += [self._make("videoscale"), self._caps(f"video/x-raw,width={ow},height={oh}")]
         # videobox: negative = add border, positive = crop. Places the canvas
@@ -740,6 +745,17 @@ class GstEngine(BaseEngine):
         if (left, top, right, bottom) != (0, 0, 0, 0):
             els += [self._make("videobox", left=left, top=top, right=right, bottom=bottom, fill=0),
                     self._make("videoconvert")]
+        if kind == "kms":
+            # Prefer formats display planes take as-is (NV12 first) ...
+            els.append(self._caps("video/x-raw,format={ NV12, YUY2, UYVY, BGRx, BGRA, RGBx, xRGB }"))
+            # ... and keep converters from writing straight into kmssink's dumb buffers.
+            # Those are uncached (write-combined), so converting into them pixel by pixel is
+            # very slow - HDMI ran at half rate while NDI was fine. kmssink instead copies
+            # each finished frame across in one sequential pass.
+            ident = self._make("identity")
+            if ident.find_property("drop-allocation"):
+                ident.set_property("drop-allocation", True)
+                els.append(ident)
         els.append(sink)
         self._branch(tee, *els)
         self._count(sink.get_static_pad("sink"), "display")
@@ -796,7 +812,7 @@ class GstEngine(BaseEngine):
     def _build_ndi(self, tee, atee, ndi) -> None:
         name = ndi.get("name") or "CuePlayer"
         sink = self._make("ndisink", "ndi_sink", ndi_name=name)
-        # videoconvert is a passthrough when ndisink accepts I420 (it does), so no per-frame cost
+        # videoconvert is a passthrough when ndisink accepts the canvas format (NV12), so no per-frame cost
         vq = [self._make("queue", leaky=2, max_size_buffers=2), self._make("videoconvert")]
         if atee is not None and self._has("ndisinkcombiner"):
             comb = self._make("ndisinkcombiner")
