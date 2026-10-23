@@ -722,6 +722,15 @@ class GstEngine(BaseEngine):
                  self.status["display"], self.status["ndi"])
         self._emit(type="engine_started")
 
+    def _sink_queue(self) -> Any:
+        """Queue in front of a synchronised output (HDMI, NDI). Frames wait there until their
+        display time - the pipeline latency, which grows to ~1/3 s with an audio sink - so it
+        must hold that much time. A 3-frame limit dropped half the frames without audio and
+        most of them with audio on. Still leaky, so a stuck output can't stall the others."""
+        ms = int(self.settings["output"].get("latency_ms", 100)) + 400
+        return self._make("queue", leaky=2, max_size_buffers=0, max_size_bytes=0,
+                          max_size_time=ms * Gst.MSECOND)
+
     def _fakesink(self):
         el = self._make("fakesink", sync=True)
         el.set_property("async", False)
@@ -816,7 +825,7 @@ class GstEngine(BaseEngine):
             sink.set_property("processing-deadline",
                               int(self.settings["output"].get("latency_ms", 100)) * Gst.MSECOND)
 
-        dq = self._make("queue", max_size_buffers=3, leaky=2)
+        dq = self._sink_queue()
         # A leaky queue drops silently when the sink can't keep up: count it
         dq.connect("overrun", lambda *_: self._frames.__setitem__(
             "display_drops", self._frames.get("display_drops", 0) + 1))
@@ -909,7 +918,7 @@ class GstEngine(BaseEngine):
         name = ndi.get("name") or "CuePlayer"
         sink = self._make("ndisink", "ndi_sink", ndi_name=name)
         # videoconvert is a passthrough when ndisink accepts the canvas format (NV12), so no per-frame cost
-        vq = [self._make("queue", leaky=2, max_size_buffers=2), self._make("videoconvert")]
+        vq = [self._sink_queue(), self._make("videoconvert")]
         if atee is not None and self._has("ndisinkcombiner"):
             comb = self._make("ndisinkcombiner")
             self._branch(tee, *vq)
