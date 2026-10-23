@@ -870,6 +870,24 @@ class GstEngine(BaseEngine):
         return self._make("queue", leaky=2, max_size_buffers=0, max_size_bytes=0,
                           max_size_time=ms * Gst.MSECOND)
 
+    @staticmethod
+    def _dedupe_caps(pad) -> None:
+        """Drop CAPS events identical to the last one. The compositor re-announces its
+        (unchanged) caps whenever a clip pad is added or removed; kmssink treats every caps
+        event as new - it sets the mode again and swaps in fresh, all-zero (green) buffers,
+        which showed as black/green flashes on changes."""
+        last = {"caps": None}
+
+        def probe(_pad, info):
+            ev = info.get_event()
+            if ev.type == Gst.EventType.CAPS:
+                caps = ev.parse_caps()
+                if last["caps"] is not None and caps.is_equal(last["caps"]):
+                    return Gst.PadProbeReturn.DROP
+                last["caps"] = caps
+            return Gst.PadProbeReturn.OK
+        pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, probe)
+
     def _fakesink(self):
         el = self._make("fakesink", sync=True)
         el.set_property("async", False)
@@ -992,6 +1010,7 @@ class GstEngine(BaseEngine):
         els.append(sink)
         self._branch(tee, *els)
         self._count(sink.get_static_pad("sink"), "display")
+        self._dedupe_caps(sink.get_static_pad("sink"))
 
         def caps_probe(_pad, info):
             ev = info.get_event()
@@ -1082,6 +1101,7 @@ class GstEngine(BaseEngine):
             aq[-1].get_static_pad("src").link((comb.request_pad_simple("audio") if hasattr(comb, "request_pad_simple") else comb.get_request_pad("audio")))
         else:
             self._branch(tee, *vq, sink)
+        self._dedupe_caps(sink.get_static_pad("sink"))
 
     # ---- AES67 ----------------------------------------------------------------
     def _ptp_clock(self, domain: int, iface: str) -> Any:
@@ -1589,7 +1609,12 @@ class GstEngine(BaseEngine):
                     old.apad.set_property("volume", 1.0 - a)
             if a >= 1.0:
                 if old is not None:
-                    self._release(old)
+                    if new is not None and fade_ms <= 0:
+                        # Cut: keep the old clip underneath for a moment, so if the new
+                        # clip's first frame is a little late the old picture shows, not black
+                        self._release_later(old)
+                    else:
+                        self._release(old)
                 return False
             return True
 
@@ -1598,6 +1623,13 @@ class GstEngine(BaseEngine):
             tick()
         else:
             GLib.timeout_add(self.FADE_STEP_MS, tick)
+
+    def _release_later(self, clip: _Clip) -> None:
+        if clip.apad is not None:
+            clip.apad.set_property("volume", 0.0)
+        fps = max(1, int(self.settings["output"]["framerate"]))
+        ms = int(self.settings["output"].get("latency_ms", 100)) + 2 * 1000 // fps
+        GLib.timeout_add(ms, lambda: (self._release(clip), False)[1])
 
     def _black(self, fade_ms: int) -> None:
         old = self.visible
