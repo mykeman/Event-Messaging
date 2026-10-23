@@ -29,6 +29,8 @@ import itertools
 import logging
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -215,6 +217,29 @@ def eld_alsa_device(asound: str = "/proc/asound") -> Optional[Tuple[str, str]]:
             if m and dev and m.group(1).strip() in names and names[0]:
                 return f"plughw:CARD={card_id},DEV={dev.group(1)}", m.group(1).strip()
     return None
+
+
+def unmute_digital_outputs(card: str) -> List[str]:
+    """Switch on every IEC958 (S/PDIF / HDMI) control of an ALSA card. On Intel/AMD HDA they
+    start muted, and without a desktop sound server nothing turns them on - HDMI audio is
+    then silent even though the right device is playing. Returns the controls switched on."""
+    amixer = shutil.which("amixer")
+    if not amixer:
+        return []
+    try:
+        out = subprocess.run([amixer, "-c", card, "scontrols"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (subprocess.SubprocessError, OSError):
+        return []
+    done = []
+    for name, idx in re.findall(r"Simple mixer control '(IEC958[^']*)',(\d+)", out):
+        try:
+            subprocess.run([amixer, "-c", card, "-q", "sset", f"{name},{idx}", "on"],
+                           capture_output=True, timeout=5)
+            done.append(f"{name},{idx}")
+        except (subprocess.SubprocessError, OSError):
+            pass
+    return done
 
 
 def audio_server_running() -> bool:
@@ -926,6 +951,11 @@ class GstEngine(BaseEngine):
                 found = eld_alsa_device()                    # Intel/AMD: the port with a screen
                 if found:
                     hdmi, hdmi_note = found[0], f"HDMI to screen '{found[1]}'"
+                    card = re.search(r"CARD=([^,]+)", hdmi)
+                    if card and kind in ("auto", "alsa") and not device:
+                        switched = unmute_digital_outputs(card.group(1))
+                        if switched:
+                            log.info("unmuted %s on card %s", ", ".join(switched), card.group(1))
             if kind == "auto" and not audio_server_running() and (device or hdmi):
                 kind = "alsa"  # no desktop sound server: talk to ALSA directly
             if kind == "alsa" and not device and hdmi and hdmi.startswith("hdmi:CARD=vc4") \
