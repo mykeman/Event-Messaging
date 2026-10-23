@@ -164,9 +164,11 @@ class Library:
         return self.media_dir / item["filename"]
 
     def playable_path(self, item: Dict[str, Any]) -> Path:
-        """The file to play: the converted playback copy when ready, else the original."""
+        """The file to play: the converted playback copy if there is one - including the
+        previous copy while a new one is being made, or if re-converting failed - else the
+        uploaded original (e.g. while a first copy is queued or converting)."""
         pb = item.get("playback") or {}
-        if pb.get("status") == "ready" and pb.get("file"):
+        if pb.get("file") and pb.get("status") != "original":
             p = self.media_dir / pb["file"]
             if p.exists():
                 return p
@@ -226,6 +228,9 @@ class Library:
                 return
             size = (self.media_dir / name).stat().st_size
             pb = item.setdefault("playback", {})
+            old = pb.get("file")
+            if old and old != name and not pb.get("original_removed"):
+                (self.media_dir / old).unlink(missing_ok=True)  # e.g. a .jpg copy now .png
             item.pop("decode", None)  # new file: give the hardware decoder another go
             pb.update(status="ready", file=name, size=size, target=target, progress=100,
                       error=None, finished=time.time(), updated=time.time())

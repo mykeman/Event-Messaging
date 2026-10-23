@@ -176,7 +176,7 @@ function playbackLine(m) {
   const t = pb.target;
   const tdesc = t ? (t.kind === "video" ? `H.264 ${t.width}×${t.height}@${t.fps}` : `${t.format.toUpperCase()} ${t.width}×${t.height}`) : "";
   switch (pb.status) {
-    case "queued": return el("div", { class: "small", style: { color: "var(--warn)" }, title: why }, "⏳ Queued for conversion (playing original)");
+    case "queued": return el("div", { class: "small", style: { color: "var(--warn)" }, title: why }, pb.file ? "⏳ Queued for re-conversion (playing previous copy)" : "⏳ Queued for conversion (playing original)");
     case "converting": return el("div", { class: "small", title: why },
       el("div", { style: { color: "var(--warn)" } }, `Converting to ${tdesc} · ${Math.round(pb.progress || 0)}%`),
       el("div", { class: "progress" }, el("div", { style: { width: (pb.progress || 0) + "%" } })));
@@ -262,7 +262,7 @@ function syncConversionJobs() {
     const what = t ? (t.kind === "video" ? `H.264 ${t.width}×${t.height}@${t.fps}` : `${(t.format || "").toUpperCase()} ${t.width}×${t.height}`) : "";
     if (pb.status === "queued") {
       live.add(m.id);
-      jobs.set(key, { title: m.name, detail: "Waiting to convert" + (what ? " to " + what : "") + " · original plays meanwhile", pct: null });
+      jobs.set(key, { title: m.name, detail: "Waiting to convert" + (what ? " to " + what : "") + (pb.file ? " · previous copy plays meanwhile" : " · original plays meanwhile"), pct: null });
     } else if (pb.status === "converting") {
       live.add(m.id);
       const extra = [pb.speed ? pb.speed + "× speed" : "", pb.eta != null ? fmtDur(pb.eta) + " left" : ""].filter(Boolean).join(" · ");
