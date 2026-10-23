@@ -56,7 +56,10 @@ function renderStatus() {
   $("#st-display-warn").classList.toggle("hidden", !eng.display_warning);
   $("#st-decoder").textContent = eng.video_decoder ? eng.video_decoder + (/^(avdec|vp8dec|vp9dec|dav1d|openh264)/.test(eng.video_decoder) ? " (software)" : " (hardware)") : "—";
   const dropped = eng.frames_dropped || 0;
-  $("#st-frames").textContent = eng.frames_rendered || dropped ? `${dropped} dropped` : "—";
+  const f = eng.fps;
+  $("#st-frames").textContent = (f ? `clip ${f.clip} · mixed ${f.composited} · HDMI ${f.display} fps` : "—") +
+    (dropped ? ` · ${dropped} dropped` : "");
+  $("#st-frames").title = "Frames per second at each stage: the playing clip, the compositor, and the HDMI output. A stage at 0 while the one before is running shows where playback stalls.";
   $("#st-frames").style.color = dropped ? "var(--warn)" : "";
   if ($("#aes67-status")) $("#aes67-status").textContent = aes67Status();
   $("#canvas-info").textContent = (eng.canvas || "") + (eng.backend ? " · " + eng.backend : "");
@@ -526,7 +529,7 @@ async function init() {
   setInterval(async () => {
     if (document.hidden || !$("#tab-live").classList.contains("active")) return;
     try { S.status = await api("GET", "/api/status", undefined, { quiet: true }); renderStatus(); } catch {}
-  }, 3000);
+  }, 1000);
 }
 
 initTabs(name => { if (name === "live") startPreview(); });

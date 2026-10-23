@@ -376,6 +376,9 @@ class GstEngine(BaseEngine):
         self._disabled_outputs: set = set()   # outputs switched off after repeated failures
         self._orig_ranks: Dict[str, int] = {}
         self._element_clip: Dict[str, int] = {}  # element name -> clip id
+        self._frames: Dict[str, int] = {}        # buffers seen per stage (diagnostics)
+        self._frames_prev: Dict[str, int] = {}
+        self._rate_timer = None
         self._display_attempt = 0       # index into the display start-up strategies
         self._display_attempts = 1
         self._display_port: Optional[str] = None   # e.g. HDMI-A-2, for matching HDMI audio
@@ -468,6 +471,22 @@ class GstEngine(BaseEngine):
             if not a.link(b):
                 raise RuntimeError(f"failed to link {a.get_name()} -> {b.get_name()}")
 
+    # ---- diagnostics: frames per second at each stage -----------------------------
+    def _count(self, pad, key: str) -> None:
+        def probe(_pad, _info):
+            self._frames[key] = self._frames.get(key, 0) + 1
+            return Gst.PadProbeReturn.OK
+        pad.add_probe(Gst.PadProbeType.BUFFER, probe)
+
+    def _update_rates(self) -> bool:
+        """Once a second: frames that passed each stage in the last second. A stage at 0
+        while the one before it is running shows where the pipeline is stuck."""
+        now = dict(self._frames)
+        self.status["fps"] = {k: now.get(k, 0) - self._frames_prev.get(k, 0)
+                              for k in ("clip", "composited", "display")}
+        self._frames_prev = now
+        return True
+
     def _teardown(self) -> None:
         if self._ptp_timer:
             GLib.source_remove(self._ptp_timer)
@@ -540,6 +559,7 @@ class GstEngine(BaseEngine):
         bgpad.set_property("zorder", 0)
         bgcaps.get_static_pad("src").link(bgpad)
         self._chain(outcaps, tee)
+        self._count(outcaps.get_static_pad("src"), "composited")
         self.comp.link(outcaps)
 
         # clock branch: keeps the pipeline paced even with no other outputs
@@ -611,6 +631,8 @@ class GstEngine(BaseEngine):
         if ret == Gst.StateChangeReturn.FAILURE:
             raise RuntimeError("pipeline failed to start")
         self.status.update(running=True, canvas=f"{cw}x{ch}@{fps}")
+        if self._rate_timer is None:
+            self._rate_timer = GLib.timeout_add_seconds(1, self._update_rates)
         log.info("pipeline started %s display=%s ndi=%s", self.status["canvas"],
                  self.status["display"], self.status["ndi"])
         self._emit(type="engine_started")
@@ -720,6 +742,7 @@ class GstEngine(BaseEngine):
                     self._make("videoconvert")]
         els.append(sink)
         self._branch(tee, *els)
+        self._count(sink.get_static_pad("sink"), "display")
         self.status["display"] = f"{kind} {dw}x{dh}{' ' + mode_note if mode_note else ''} · canvas at {x},{y} ({ow}x{oh})"
 
     def _build_audio(self, audio, low_latency: bool = False) -> Any:
@@ -1084,6 +1107,14 @@ class GstEngine(BaseEngine):
             return Gst.PadProbeReturn.OK
 
         vsrcpad.add_probe(Gst.PadProbeType.BUFFER, first_buffer)
+        clip_pad = vsrcpad
+
+        def clip_frames(_pad, _info):
+            if self.current is clip or not self.current:
+                self._frames["clip"] = self._frames.get("clip", 0) + 1
+            return Gst.PadProbeReturn.OK
+
+        clip_pad.add_probe(Gst.PadProbeType.BUFFER, clip_frames)
         vsrcpad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, eos_probe)
         if achain:
             achain[-1].get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, first_buffer)
