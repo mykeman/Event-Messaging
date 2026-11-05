@@ -68,6 +68,27 @@
           <div class="row between"><b id="lock-text"></b><button class="small" id="lock-clear">Clear — back to Normal</button></div>
           <div class="small muted">Locked scenario: other triggers are blocked until it's cleared.</div>
         </div>
+        <div id="feature-box" style="margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--line)">
+          <div class="row between"><h2>Feature screening</h2><span id="feature-badge"></span></div>
+          <div id="feature-now" class="hidden">
+            <div class="row"><b id="feature-title"></b><span class="spacer" style="flex:1"></span><span class="mono small" id="feature-time"></span></div>
+            <div class="progress" style="margin:6px 0"><div id="feature-progress"></div></div>
+            <div class="small" id="feature-note" style="color:var(--warn)"></div>
+            <div class="row" style="margin-top:6px">
+              <button id="feature-resume" class="primary hidden" title="Carry on from where it stopped">&#9654; Resume</button>
+              <input id="feature-seek-at" placeholder="h:mm:ss" style="width:90px" title="Jump to this time">
+              <button id="feature-seek">Jump</button>
+              <span class="spacer" style="flex:1"></span>
+              <button id="feature-stop" class="danger" title="End the feature (then the Normal playlist)">&#9632; Stop feature</button>
+            </div>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <select id="feature-media" style="flex:1; min-width:160px"></select>
+            <input id="feature-start" placeholder="start h:mm:ss" style="width:110px" title="Start this far in (blank = from the beginning)">
+            <button id="feature-play">&#9654; Play feature</button>
+          </div>
+          <p class="small muted" style="margin:6px 0 0">An emergency message, cue or Black pauses the feature; Normal (or the message ending) carries on from the same point.</p>
+        </div>
         <div class="row between"><h2>Scenarios</h2><a href="#cues" class="small">Edit cues</a></div>
         <div class="cue-grid" id="live-scenarios"></div>
         <h3>Event cues</h3>
@@ -198,6 +219,7 @@
           <h2>System</h2>
           <dl class="kv" id="sysinfo"></dl>
         </div>
+        <div class="card" id="sw-update"></div>
         <div class="card">
           <div class="row"><button class="primary big" id="settings-save">Save settings</button>
             <span class="small muted">Output changes restart the video pipeline (≈1 s blank).</span></div>

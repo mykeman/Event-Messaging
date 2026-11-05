@@ -17,7 +17,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 REPEATS = ("none", "daily", "weekly")
-SPECIAL_PLAYLISTS = ("normal", "black")   # an entry can also show the Normal playlist / black
+# An entry can also show the Normal playlist / black, or start a feature (film): "feature"
+# with "media" set starts that video once when the entry begins (the Normal playlist is the
+# fallback around it)
+SPECIAL_PLAYLISTS = ("normal", "black", "feature")
 
 
 def _now(tz: str = "") -> dt.datetime:
@@ -158,8 +161,13 @@ class Schedule:
             return True
 
     def drop_media(self, media_id: str) -> None:
-        """Remove a deleted media item from every playlist."""
+        """Remove a deleted media item from every playlist (and disable feature entries)."""
         with self._lock:
+            if any(e.get("media") == media_id for e in self.entries.values()):
+                for e in self.entries.values():
+                    if e.get("media") == media_id:
+                        e["enabled"] = False
+                self._save(self.sc_path, self.entries)
             changed = False
             for p in self.playlists.values():
                 kept = [i for i in p["items"] if i["media"] != media_id]
@@ -175,6 +183,9 @@ class Schedule:
         playlist = str(d.get("playlist") or "").strip()
         if playlist not in SPECIAL_PLAYLISTS and playlist not in self.playlists:
             errors.append("choose a playlist")
+        media = str(d.get("media") or "").strip() if playlist == "feature" else ""
+        if playlist == "feature" and not media:
+            errors.append("choose the feature (video) to play")
         try:
             start, end = _parse_dt(d.get("start")), _parse_dt(d.get("end"))
         except ValueError:
@@ -197,7 +208,7 @@ class Schedule:
         if errors:
             raise ValueError("; ".join(errors))
         return {"title": title or (self.playlists.get(playlist, {}).get("name") or playlist.title()),
-                "playlist": playlist, "start": start.isoformat(timespec="minutes"),
+                "playlist": playlist, "media": media or None, "start": start.isoformat(timespec="minutes"),
                 "end": end.isoformat(timespec="minutes"), "repeat": repeat, "days": days,
                 "until": until, "color": str(d.get("color") or "")[:16],
                 "takeover": bool(d.get("takeover", False)), "enabled": bool(d.get("enabled", True))}

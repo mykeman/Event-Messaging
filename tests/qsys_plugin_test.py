@@ -25,7 +25,9 @@ SAMPLE_CUES = {
 HARNESS = r"""
 local M = {}
 function M.ctl(name)
-  return { Name = name, String = "", Boolean = false, Value = 0, Legend = "", Color = nil }
+  local c = { Name = name, String = "", Boolean = false, Value = 0, Legend = "", Color = nil, Triggered = 0 }
+  function c:Trigger() self.Triggered = self.Triggered + 1 end
+  return c
 end
 -- Controls.X behaves as one control, Controls.X[i] for arrays
 function M.build_controls(defs)
@@ -96,7 +98,7 @@ def main():
         n = d["Count"]
         names |= {d["Name"]} if n == 1 else {f"{d['Name']} {i}" for i in range(1, n + 1)}
     laid = set()
-    for page in (1, 2):
+    for page in (1, 2, 3):
         props["page_index"] = lua.table_from({"Value": page})
         layout, graphics = g.GetControlLayout(props)
         laid |= set(layout.keys())
@@ -154,6 +156,31 @@ def main():
     M.sock.EventHandler(M.sock, 2, None)
     check("normal clears LEDs", C.IsNormal.Boolean and not C.Locked.Boolean and not C.ScenarioActive[fire].Boolean
           and C.Mode.String == "normal")
+    # feature screening
+    check("asks for FEATURE STATUS on connect", "FEATURE STATUS" in list(M.sent.values()), list(M.sent.values()))
+    M.set(C.FeatureMedia, "Big Film")
+    M.set(C.FeatureStart, "0:10:00")
+    M.press(C.FeaturePlay)
+    check("Play feature sends FEATURE <media> START=", list(M.sent.values())[-1] == 'FEATURE "Big Film" START=0:10:00',
+          list(M.sent.values())[-1])
+    M.lines[1] = 'FEATURE state=playing pos=3723.4 dur=5400.0 remain=1676.6 progress=0.6895 media="Big Film" id=f1'
+    M.sock.EventHandler(M.sock, 2, None)
+    check("feature position shown", C.FeaturePosition.String == "1:02:03" and C.FeatureRemaining.String == "0:27:57"
+          and C.FeaturePlaying.Boolean and abs(C.FeatureProgress.Value - 68.95) < 0.01,
+          (C.FeaturePosition.String, C.FeatureRemaining.String, C.FeatureProgress.Value))
+    M.lines[1] = 'FEATURE event=interrupted state=interrupted pos=3800.0 dur=5400.0 remain=1600.0 progress=0.7 media="Big Film" id=f1 by="Fire alarm"'
+    M.sock.EventHandler(M.sock, 2, None)
+    check("interrupted LED", C.FeatureInterrupted.Boolean and not C.FeaturePlaying.Boolean)
+    M.press(C.FeatureResume)
+    check("Resume sends FEATURE RESUME", list(M.sent.values())[-1] == "FEATURE RESUME")
+    M.lines[1] = 'FEATURE event=finished state=finished pos=5400.0 dur=5400.0 remain=0.0 progress=1.0000 media="Big Film" id=f1'
+    M.lines[2] = 'FEATURE state=finished pos=5400.0 dur=5400.0 remain=0.0 progress=1.0000 media="Big Film" id=f1'
+    M.sock.EventHandler(M.sock, 2, None)
+    check("Ended trigger fires once on finish", C.FeatureEnded.Triggered == 1 and C.FeatureFinished.Boolean,
+          C.FeatureEnded.Triggered)
+    M.press(C.FeatureStop)
+    check("Stop sends FEATURE STOP", list(M.sent.values())[-1] == "FEATURE STOP")
+
     M.lines[1] = "ERR blocked: 'Fire alarm' is active - send NORMAL to clear it (or add force=1)"
     M.sock.EventHandler(M.sock, 2, None)
     check("errors shown in Status", "blocked" in C.Status.String and C.Status.Value == 1)

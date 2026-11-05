@@ -9,7 +9,9 @@ CuePlayer is for places that run a rotation of standard messaging and need to sw
 - **Standard scenarios**: a ready-made set of situations every venue needs a message for: venue at capacity, entry closed, event delayed, severe weather, lost child, medical emergency, fire alarm, evacuate now and shelter in place (cues 101–109). Assign your content to each. Emergency scenarios are **locked**: they stay on screen until *Normal* is pressed, and ordinary triggers can't replace them.
 - **Event cues**: numbered/labelled presets for event-specific content, optionally a sequence of items, with loop, duration and *then* behaviour (return to normal, hold the last frame, black, or chain to another cue).
 - **Normal playlist**: the fallback that plays whenever no scenario or event cue is active.
-- **Automatic media conversion**: each unit checks its own hardware and converts files it would struggle to play (codec, size, frame rate, 10-bit, interlaced) to an optimised H.264 copy in the background.
+- **Feature screening**: play a film from the GUI, API or schedule. An emergency message pauses it at its position, and it carries on from there when the message is cleared. Q-SYS gets the position and an *Ended* trigger.
+- **Media conversion** (optional, off by default): each unit checks its own hardware and converts files it would struggle to play (codec, size, frame rate, 10-bit, interlaced) to an optimised H.264 copy in the background.
+- **Updates from the web GUI**: check GitHub and install the latest version with one button.
 - **Custom output raster**: compose at the LED processor's exact pixel map, with fit/fill/stretch/1:1 scaling per item, and place the canvas anywhere in the HDMI raster (with optional rescale).
 - **NDI output** of the canvas for monitoring and remote displays, plus a live preview in the web GUI.
 - **AES67 audio output** (optional, off by default, not yet bench-tested): the audio mix as a PTP-locked AES67 multicast stream that a Q-SYS Core can receive directly.
@@ -107,6 +109,15 @@ cd Event-Messaging && sudo ./deploy/update.sh
 
 This pulls the latest code, updates `/opt/cueplayer` and restarts the service. Media, settings and the service setup are kept, and if the new version fails to start it rolls back to the previous one. Re-run `deploy/install.sh` instead when you need new OS packages or install options such as `--take-hdmi`.
 
+**From the web GUI:** after `update.sh` has run once (it installs a small system helper, see below), updates can be done from **Settings → Software update**, on players and on the master:
+
+1. **Check for updates** fetches from GitHub and lists the new commits. Nothing changes yet.
+2. **Update now** pulls them and runs `update.sh`. The player restarts (a few seconds of black) and returns to what was on, including a feature at its position. If the new version fails to start, the previous one is put back. The log is shown in the card, and the result stays there afterwards.
+
+Updates are only ever started by hand. The card also has a **Reboot** button, which is needed after changing the HDMI refresh rate.
+
+*The system helper.* The service runs as the unprivileged `cueplayer` user, so the jobs that need root (writing the HDMI mode to the boot configuration, running the update and rebooting) go through `/usr/local/sbin/cueplayer-helper`. It is root-owned, and a sudo rule (`/etc/sudoers.d/cueplayer`) lets the service run that one file and nothing else. The helper checks every argument itself, and it reads the clone to update from `/opt/cueplayer/source`, a file written by `install.sh`/`update.sh` as root; the web GUI can't choose it. Updates need the clone on the unit to be free of local edits, because the pull is fast-forward only.
+
 ### Development / trying it out (no GStreamer)
 
 ```bash
@@ -126,16 +137,18 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 |---|---|
 | **Canvas** width × height @ fps | The raster everything is composed at. Use the LED processor's pixel map (e.g. `1152×576`). NDI carries exactly this. |
 | **Scale media** | `fit` (letterbox), `fill` (crop), `stretch`, or `none` (1:1, centred). Can be overridden per item. |
-| **Display** width × height | The HDMI mode to drive (e.g. `1920×1080`). |
+| **Display** width × height, **Refresh rate** | The HDMI mode to drive (e.g. `1920×1080` at `50 Hz`). The sizes the connected screen reports are offered as buttons. Saving also writes the mode to the boot configuration, so it **survives a reboot**. A new refresh rate takes effect **after a reboot**; until then the Live tab says it's pending. *Auto* is the screen's preferred rate, usually 60 Hz. |
 | **Offset X/Y** | Where the canvas sits in the HDMI raster, matching the region your LED processor captures. |
 | **Out width/height** | Optionally rescale the canvas on HDMI (0 = 1:1). |
 | **Video sink** | `auto`, `kms` (direct DRM, no desktop), `gl`, `x`, `wayland`, `fb`, or `none` (NDI only, e.g. a VM). |
 
 The Settings tab shows a live diagram of the canvas inside the display raster. Saving output settings restarts the video pipeline, which blanks the screen for about a second.
 
+**How the HDMI mode is applied.** The video driver (kmssink) can pick a resolution but not a refresh rate; left to itself it takes the first mode at that size, usually 60 Hz. So the player writes `video=HDMI-A-n:WxH@Hz` to the kernel command line (`/boot/firmware/cmdline.txt` on a Pi, `GRUB_CMDLINE_LINUX_DEFAULT` plus `update-grub` on a PC), the same entry `install.sh --take-hdmi --hdmi-mode` writes. The port then comes up in that mode at boot, and the player reuses it. The port set by `--take-hdmi` and its forced-on `D` flag are kept. The first change backs up the original file as `*.cueplayer.bak`, which `install.sh --release-hdmi` restores. *Display mode: keep* makes the player always reuse the boot mode.
+
 **Smooth playback:**
 
-- Match the canvas frame rate to your content and the HDMI mode to the canvas. For 50 fps video, use a 50 fps canvas and `--hdmi-mode 1920x1080@50`. A 50 fps video on a 30 fps canvas or a 60 Hz output will judder.
+- Match the canvas frame rate to your content and the HDMI mode to the canvas. For 50 fps video, use a 50 fps canvas and set *Refresh rate* to 50 Hz (then reboot). A 50 fps video on a 30 fps canvas or a 60 Hz output will judder.
 - The Live tab shows the **decoder** in use and the number of **dropped frames**. If frames are being dropped, raise *Latency budget (ms)* in Settings → Canvas. If the decoder says *software*, check the codec: a Pi 4 decodes H.264 in hardware, a Pi 5 only HEVC (H.265).
 - NDI encoding is CPU-heavy. If playback is uneven with NDI on, test with NDI disabled. A Pi 5 or an x86 mini PC is the better choice when you need NDI at full rate.
 - Keep the canvas at 1080p or below on a Pi, and pre-scale content to the canvas size where you can.
@@ -159,6 +172,8 @@ The Settings tab shows a live diagram of the canvas inside the display raster. S
 
 Every control has a pin, so the buttons can also be driven from other Q-SYS logic, such as a fire-panel contact closure into *Scenario 7*.
 
+- **Feature page:** *Media* (name or id) and *Start at*, **Play feature**, **Resume** and **Stop feature** buttons. *Playing*, *Interrupted* and *Finished* LEDs, the title, position, duration and remaining time (as `h:mm:ss` and as whole seconds), and a progress meter. **Ended** is a trigger output pin that fires once when the film finishes; wire it to whatever switches the venue back. The Feature page talks to a player directly, not through the master.
+
 `qsys/cueplayer_control.lua` is a simpler Control Script alternative with the same protocol.
 
 ### TCP / UDP line protocol
@@ -178,12 +193,16 @@ BLACK FADE=1000
 NEXT
 STATUS                              → STATUS mode=… cue=… media="…" elapsed=… duration=…
 EVENTS OFF | EVENTS ON              unsolicited EVENT lines (on by default)
+FEATURE "Big Film" START=0:10:00    start a feature (film); START is optional
+FEATURE STOP [BLACK|HOLD]           end it (then the Normal playlist, or black / hold)
+FEATURE RESUME | FEATURE SEEK 1:02:03
+FEATURE STATUS                      → FEATURE state=playing pos=3723.4 dur=5400.0 remain=1676.6 progress=0.6895 media="Big Film" id=…
 ```
 
 Options: `LOOP`, `HOLD`, `DURATION=<s>`, `AFTER=default|hold|black|cue:<n>`, `FADE=<ms>`.
 Over UDP, a single datagram can carry `AUTH <token> CUE 3`.
 
-TCP clients receive `EVENT mode=… cue=… media="…"` whenever playback changes.
+TCP clients receive `EVENT mode=… cue=… media="…"` whenever playback changes. While a feature plays they also get a `FEATURE state=playing pos=…` line every second, and a line with `event=<name>` on every change: `started`, `waiting`, `interrupted`, `resumed`, `seek`, `finished` and `stopped`. **`FEATURE event=finished`** is sent once, when the film ends.
 
 **Master** (its TCP port):
 
@@ -216,6 +235,11 @@ GET  /api/cues           PUT /api/cues/{n}      DELETE /api/cues/{n}
 GET  /api/settings       PATCH /api/settings
 GET  /api/preview.jpg    GET /api/preview.mjpg   WS /api/ws
 GET  /api/aes67.sdp      SDP of the AES67 audio stream (404 when off, 503 until PTP is locked)
+GET  /api/feature/play/{media}?start=0:10:00     start a feature (film)
+GET  /api/feature        state, position, duration, remaining (s), progress (0-1)
+GET  /api/feature/stop?then=default|black|hold   GET /api/feature/resume   GET /api/feature/seek?position=1:02:03
+GET  /api/display/modes  sizes the screen reports, refresh rates, the boot mode
+GET  /api/system/update  POST /api/system/update/check   POST /api/system/update   POST /api/system/reboot
 ```
 
 Master:
@@ -272,9 +296,25 @@ The media DSCP (default 34, AF41) and TTL are configurable for both profiles.
 
 While anything is uploading, converting or being sent to screens, an **Activity** panel appears in the bottom-left corner of the web GUI on every tab. Each upload shows its progress, then *Processing on the unit…* while the player checks the file. Each conversion shows its target format, a progress bar, its speed (for example 1.4× real time) and the time left. On the master, each screen being sent media shows the file count. The panel can be collapsed, and it clears itself when the work is done.
 
+## Feature screening
+
+A feature is a long video, such as a film, that plays as the main content until it ends. It works differently from a cue in three ways:
+
+- **It keeps its place.** Anything else that takes the screen pauses it at its position: an emergency message (locked scenario), an event cue, a playlist, a test pattern or Black. When that is cleared with **Normal**, or an event cue simply ends, the film carries on from where it stopped. *Settings → Feature screening → Rewind on resume* can back it up a few seconds first. While the film is playing, **Normal does nothing to it**; use **Stop feature** to end it.
+- **It reports its position.** The Live tab, `GET /api/feature`, the TCP `FEATURE` lines and the Q-SYS plugin show the position, the remaining time and the progress.
+- **It says when it's finished.** When the film ends the player sends `FEATURE event=finished` to TCP clients, so the Q-SYS plugin fires its *Ended* trigger. It can also call a webhook. Then it goes to the Normal playlist, black, or holds the last frame (*Settings → Feature screening → When it ends*).
+
+Start one from the **Live tab** (*Feature screening*: choose the video, optionally a start time, **▶ Play feature**), from the API (`GET /api/feature/play/<media>?start=…`, TCP `FEATURE <media>`), from the Q-SYS Feature page, or from the **schedule**: add an entry, choose *Feature screening (film)…* as the playlist, and pick the video. The entry's end time defaults to the start time plus the running time. A scheduled feature starts once, when its entry begins. If a locked scenario is on screen when a feature is started, the feature waits and begins when the scenario is cleared.
+
+The position is saved every few seconds. After a power cut or a service restart, the film carries on from the last saved point (*Resume after a restart*, on by default). The **webhook** (*Webhook URL*, optional) is called on every change with JSON `{"event": …, "feature": {…}, "screen": …}`, or as a plain GET; `{event}` in the URL is replaced with the event name.
+
+A feature must be a video file. Resuming seeks to the nearest frame from the previous keyframe, so it is frame-accurate, but long-GOP files take a moment longer to resume. Files from *Convert now* have a keyframe every 2 s.
+
 ## Media conversion
 
-Every player checks what it is running on (Raspberry Pi 4 or 5, x86 with Intel/AMD/NVIDIA decoding, and so on) and which codecs it can decode in hardware. It then checks each file against that and the canvas. A file gets an optimised **H.264 playback copy** (8-bit 4:2:0 MP4, at the canvas size and frame rate) when it:
+**Automatic conversion is off by default.** Turn it on in **Settings → Media conversion → Automatic conversion**. While it is off, files play exactly as uploaded, and any playback copies made earlier keep being used. **Convert now** on a file (*Media → Edit*) still makes a copy by hand.
+
+When it is on, every player checks what it is running on (Raspberry Pi 4 or 5, x86 with Intel/AMD/NVIDIA decoding, and so on) and which codecs it can decode in hardware. It then checks each file against that and the canvas. A file gets an optimised **H.264 playback copy** (8-bit 4:2:0 MP4, at the canvas size and frame rate) when it:
 
 - uses a codec this unit can't decode efficiently (ProRes, DNxHD, MPEG-2, VP9/AV1 without hardware support, HEVC on machines without an HEVC decoder),
 - is 10-bit or 4:2:2/4:4:4,
@@ -287,7 +327,7 @@ Large photos, and image formats other than PNG/JPEG, are scaled to the canvas as
 
 Conversion runs in the background at the lowest CPU and disk priority, leaving two cores free for playback. **The original keeps playing until the copy is ready**, so last-minute event files can be used straight away. The Media tab shows each file's status (queued, converting with a progress bar, optimised, or failed) and why it was converted. *Edit* has **Convert now** and **Use original** for individual files. Changing the canvas re-checks the whole library, and existing libraries are checked when you update.
 
-Settings → *Media conversion* has the mode (`auto`, `always` or `off`), whether to keep originals, x264 quality (CRF) and speed preset, and thread count. On a Pi, converting a long 1080p clip can take a while. Converting high-bitrate masters before upload, or on a faster machine, is still the quickest route.
+Settings → *Media conversion* has the on/off switch, what to convert when it's on (files that need it, or every file), whether to keep originals, x264 quality (CRF) and speed preset, and thread count. On a Pi, converting a long 1080p clip can take a while. Converting high-bitrate masters before upload, or on a faster machine, is still the quickest route.
 
 ## How the master distributes media
 
@@ -369,6 +409,8 @@ Turn on **Settings → Audio**; it is off by default. With *Sink* on `auto` and 
   - `tests/test_transcode.py` covers the convert/don't-convert decisions and the ffmpeg command.
   - `tests/test_aes67.py` covers the AES67 SDP and SAP packets and the AES67 settings validation.
   - `tests/qsys_plugin_test.py` runs the Q-SYS plugin in a simulated Q-SYS runtime (needs `pip install lupa`).
+  - `tests/test_feature.py` covers feature screening (pause, resume, finish, restart, schedule, TCP and HTTP), the conversion switch, the HDMI refresh setting and the update endpoints, on the mock engine. `tests/test_helper.py` covers the boot command-line editing.
+  - **Not yet run on hardware:** resuming a feature at its position (a GStreamer seek), the HDMI boot mode on a Pi and on the Giada (GRUB), and an update started from the GUI.
   - The plugin has not yet been loaded in Q-SYS Designer, and conversion has not yet been run with a real ffmpeg on a Pi.
 - **The GStreamer engine (`cueplayer/engine.py`) has not yet been run on target hardware.** Before deployment, bench-test it on the actual Pi or VM with real media: cut/fade between video and image, looping, HDMI placement on the LED processor, NDI in Studio Monitor, and long soak runs.
 - **AES67 output has not yet been tested with real AES67 hardware or a Q-SYS Core.** Only the SDP/SAP generation and settings validation are tested (`tests/test_aes67.py`). Bench-test PTP lock, Q-SYS discovery, audio quality and lip-sync before relying on it. It supports 1–2 channels and assumes the PTP helper has the capabilities set by `install.sh`.

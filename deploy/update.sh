@@ -5,6 +5,8 @@
 #   cd Event-Messaging && sudo ./deploy/update.sh
 #
 # Use --no-pull to install the working copy as-is (e.g. after copying files over).
+# After the first run, later updates can also be started from the web GUI
+# (Settings > Software update).
 # For OS package changes or new install options, re-run deploy/install.sh instead.
 set -euo pipefail
 if [[ "$(uname -s)" != Linux ]] || ! command -v apt-get >/dev/null 2>&1; then
@@ -32,7 +34,7 @@ if [[ "$PULL" == 1 && -d "$SRC/.git" ]]; then
   OWNER=$(stat -c %U "$SRC")
   sudo -u "$OWNER" git -C "$SRC" pull --ff-only
 fi
-echo "==> Updating $PREFIX from $SRC ($(git -C "$SRC" log -1 --format='%h %s' 2>/dev/null || echo 'working copy'))"
+echo "==> Updating $PREFIX from $SRC ($(git -c safe.directory="$SRC" -C "$SRC" log -1 --format='%h %s' 2>/dev/null || echo 'working copy'))"
 
 rm -rf "$PREFIX/cueplayer.new"
 cp -r "$SRC/cueplayer" "$PREFIX/cueplayer.new"
@@ -43,6 +45,8 @@ mv "$PREFIX/cueplayer.new" "$PREFIX/cueplayer"
 cp "$SRC/requirements.txt" "$PREFIX/"
 [[ -d "$SRC/qsys" ]] && cp -r "$SRC/qsys" "$PREFIX/"
 "$PREFIX/venv/bin/pip" install -q -r "$PREFIX/requirements.txt"
+SVC_USER=$(systemctl show -p User --value cueplayer.service 2>/dev/null || true)
+"$SRC/deploy/install-helper.sh" "$SRC" "$PREFIX" "${SVC_USER:-cueplayer}"
 
 echo "==> Restarting service"
 systemctl restart cueplayer.service

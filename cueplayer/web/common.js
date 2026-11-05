@@ -236,3 +236,62 @@ async function uploadWithProgress(path, fd, file) {
     throw e;
   }
 }
+
+/* Software update card (Settings): check GitHub, update, reboot. Same on player and master. */
+function initSoftwareUpdate(box) {
+  if (!box) return;
+  let check = null, poll = null, busy = false;
+  const fmtBuild = b => b ? [b.version, b.commit, b.date ? b.date.slice(0, 10) : "", b.subject ? "· " + b.subject : ""].filter(Boolean).join(" ") : "—";
+  const render = st => {
+    const last = st.last || {};
+    const running = ["starting", "pulling", "installing"].includes(last.state);
+    const rows = [el("dt", {}, "Installed"), el("dd", {}, fmtBuild(st.build))];
+    if (st.source) rows.push(el("dt", {}, "From"), el("dd", { class: "mono small" }, st.source));
+    if (check) rows.push(el("dt", {}, "On GitHub"), el("dd", {},
+      check.behind ? `${check.behind} new update${check.behind > 1 ? "s" : ""} (${check.latest})` : `Up to date (${check.latest})`,
+      check.dirty ? el("div", { class: "small", style: { color: "var(--warn)" } }, "The clone on the unit has local changes - the update may refuse to pull.") : null));
+    if (last.state) rows.push(el("dt", {}, "Last update"), el("dd", { style: { color: last.state === "failed" ? "var(--err, #ef4444)" : "" } },
+      `${last.state}${last.message ? " — " + last.message : ""}` + (last.finished ? ` (${new Date(last.finished * 1000).toLocaleString()})` : "")));
+    const commits = check && check.commits && check.commits.length ? el("div", { class: "playlist small", style: { maxHeight: "160px", overflow: "auto", margin: "8px 0" } },
+      ...check.commits.map(c => el("div", { class: "item" }, el("span", { class: "mono muted" }, c.commit), el("span", { class: "muted" }, c.date), el("span", { class: "name" }, c.subject)))) : null;
+    const logBox = st.log && (running || last.state === "failed") ? el("pre", { class: "api small", style: { maxHeight: "200px", overflow: "auto" } }, st.log) : null;
+    box.replaceChildren(...[
+      el("h2", {}, "Software update"),
+      el("p", { class: "small muted", style: { marginTop: 0 } }, "Pulls the latest version from GitHub and installs it. Media, settings and the schedule are kept; the unit restarts its player (a few seconds of black) and goes back to what was on. If the new version fails to start, the previous one is put back."),
+      st.available ? null : el("p", { class: "small", style: { color: "var(--warn)" } }, "Not available: " + (st.why || "unknown")),
+      el("dl", { class: "kv" }, ...rows), commits,
+      el("div", { class: "row" },
+        el("button", { disabled: !st.available || busy || running, onclick: async () => {
+          busy = true; render(st);
+          try { check = await api("POST", "/api/system/update/check"); } catch {} finally { busy = false; }
+          refresh();
+        } }, busy ? "Checking…" : "Check for updates"),
+        el("button", { class: "primary", disabled: !st.available || running || (check && !check.behind),
+          onclick: () => confirmDo("Install the latest version now? Playback restarts (a few seconds of black).", async () => {
+            await api("POST", "/api/system/update"); toast("Update started", "ok"); watch();
+          }) }, running ? "Updating…" : "Update now"),
+        el("span", { style: { flex: 1 } }),
+        el("button", { class: "danger", disabled: !st.available, onclick: () => confirmDo("Reboot this unit now?", async () => {
+          await api("POST", "/api/system/reboot"); toast("Rebooting…", "ok"); }) }, "Reboot")),
+      logBox].filter(Boolean));
+    if (running) watch();
+  };
+  const refresh = async () => { try { render(await api("GET", "/api/system/update", undefined, { quiet: true })); } catch {} };
+  // While an update runs the service restarts: keep polling until it answers with a finished state
+  const watch = () => {
+    if (poll) return;
+    poll = setInterval(async () => {
+      try {
+        const st = await api("GET", "/api/system/update", undefined, { quiet: true });
+        const s = (st.last || {}).state;
+        if (!["starting", "pulling", "installing"].includes(s)) {
+          clearInterval(poll); poll = null; check = null;
+          toast(s === "done" ? "Updated: " + ((st.last || {}).message || "") : "Update " + s + ": " + ((st.last || {}).message || ""), s === "done" ? "ok" : "err");
+          if (s === "done") setTimeout(() => location.reload(), 1500);
+        }
+        render(st);
+      } catch {}
+    }, 2000);
+  };
+  refresh();
+}

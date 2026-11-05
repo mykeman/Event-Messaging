@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""CuePlayer system helper: the few root-only jobs the web GUI can ask for.
+
+Installed root-owned to /usr/local/sbin/cueplayer-helper by install.sh / update.sh, with a
+sudoers rule that lets the cueplayer service user run exactly this file without a password.
+Every argument is validated here; nothing the caller passes is run as a command.
+
+    cueplayer-helper hdmi-mode <WxH@Hz|auto> [HDMI-A-n]   set the HDMI mode used at boot
+    cueplayer-helper update-check                          fetch and compare with GitHub
+    cueplayer-helper update                                pull + install (runs detached)
+    cueplayer-helper reboot
+
+The repository to update from is read from /opt/cueplayer/source (written by install.sh /
+update.sh as root), never taken from the caller.
+"""
+import json
+import os
+import pwd
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+PREFIX = Path("/opt/cueplayer")
+SOURCE_FILE = PREFIX / "source"
+STATE_FILE = PREFIX / "update.json"
+LOG_FILE = PREFIX / "update.log"
+CMDLINES = ("/boot/firmware/cmdline.txt", "/boot/cmdline.txt")
+GRUB = "/etc/default/grub"
+
+
+def die(msg, code=1):
+    print(json.dumps({"ok": False, "error": msg}))
+    sys.exit(code)
+
+
+def ok(**kw):
+    print(json.dumps(dict(ok=True, **kw)))
+    sys.exit(0)
+
+
+# ---- HDMI boot mode -------------------------------------------------------------
+def edit_tokens(toks, mode, port):
+    """Replace the video=HDMI-A-n:... token. Keeps a forced-on 'D' flag and the port the
+    installer chose. mode None = auto (no mode; only keep the port forced on, if it was)."""
+    old = [t for t in toks if t.startswith("video=HDMI-A-")]
+    forced = any(re.search(r":[^ ]*D$", t) for t in old)
+    if old:
+        m = re.match(r"video=(HDMI-A-\d)", old[-1])
+        port = m.group(1) if m else port
+    port = port or "HDMI-A-1"
+    toks = [t for t in toks if not t.startswith("video=HDMI-A-")]
+    if mode:
+        toks.append(f"video={port}:{mode}" + ("D" if forced else ""))
+    elif forced:
+        toks.append(f"video={port}:D")
+    return toks, port
+
+
+def hdmi_mode(args):
+    if not args:
+        die("usage: hdmi-mode <WxH@Hz|auto> [HDMI-A-n]")
+    mode = args[0]
+    if mode == "auto":
+        mode = None
+    elif not re.fullmatch(r"\d{3,4}x\d{3,4}@\d{2,3}", mode):
+        die("mode must look like 1920x1080@50 (whole Hz) or auto")
+    port = args[1] if len(args) > 1 else ""
+    if port and not re.fullmatch(r"HDMI-A-\d", port):
+        die("port must look like HDMI-A-1")
+    for path in CMDLINES:                                   # Raspberry Pi
+        if os.path.isfile(path):
+            bak = path + ".cueplayer.bak"
+            if not os.path.exists(bak):
+                shutil.copy2(path, bak)
+            toks, port = edit_tokens(open(path).read().split(), mode, port)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(" ".join(toks) + "\n")
+            os.replace(tmp, path)
+            ok(file=path, port=port, mode=mode or "auto", reboot=True)
+    if os.path.isfile(GRUB):                                # PC with GRUB
+        text = open(GRUB).read()
+        m = re.search(r'^GRUB_CMDLINE_LINUX_DEFAULT="(.*)"$', text, re.M)
+        if not m:
+            die("GRUB_CMDLINE_LINUX_DEFAULT not found in " + GRUB)
+        if not os.path.exists(GRUB + ".cueplayer.bak"):
+            shutil.copy2(GRUB, GRUB + ".cueplayer.bak")
+        toks, port = edit_tokens(m.group(1).split(), mode, port)
+        text = text[:m.start(1)] + " ".join(toks) + text[m.end(1):]
+        with open(GRUB + ".tmp", "w") as f:
+            f.write(text)
+        os.replace(GRUB + ".tmp", GRUB)
+        r = subprocess.run(["update-grub"], capture_output=True, text=True)
+        if r.returncode != 0:
+            die("update-grub failed: " + (r.stderr or r.stdout)[-300:])
+        ok(file=GRUB, port=port, mode=mode or "auto", reboot=True)
+    die("no Raspberry Pi cmdline.txt or GRUB config found - set the mode at boot by hand")
+
+
+# ---- updates ---------------------------------------------------------------------
+def source():
+    try:
+        src = Path(SOURCE_FILE.read_text().strip())
+    except OSError:
+        die("source repository unknown - run  sudo ./deploy/update.sh  once from the clone")
+    if not (src / ".git").is_dir() or not (src / "deploy" / "update.sh").is_file():
+        die(f"{src} is not a CuePlayer git clone")
+    return src
+
+
+def git(src, *args, timeout=60):
+    owner = pwd.getpwuid(src.stat().st_uid).pw_name
+    cmd = ["git", "-c", f"safe.directory={src}", "-C", str(src), *args]
+    if owner != "root":
+        cmd = ["sudo", "-u", owner, "-H", *cmd]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def update_check(_args):
+    src = source()
+    r = git(src, "fetch", "--quiet", timeout=90)
+    if r.returncode != 0:
+        die("git fetch failed: " + (r.stderr or r.stdout).strip()[-300:])
+    def out(*a):
+        x = git(src, *a)
+        return x.stdout.strip() if x.returncode == 0 else ""
+    upstream = out("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if not upstream:
+        die("the clone's branch has no upstream (git branch --set-upstream-to origin/main)")
+    behind = int(out("rev-list", "--count", "HEAD..@{u}") or 0)
+    ahead = int(out("rev-list", "--count", "@{u}..HEAD") or 0)
+    log = out("log", "--format=%h%x09%cs%x09%s", "-n", "30", "HEAD..@{u}")
+    commits = [dict(zip(("commit", "date", "subject"), l.split("\t", 2))) for l in log.splitlines() if l]
+    dirty = bool(out("status", "--porcelain", "--untracked-files=no"))
+    ok(source=str(src), branch=out("rev-parse", "--abbrev-ref", "HEAD"), upstream=upstream,
+       current=out("rev-parse", "--short", "HEAD"), latest=out("rev-parse", "--short", "@{u}"),
+       behind=behind, ahead=ahead, dirty=dirty, commits=commits, checked=time.time())
+
+
+def write_state(**kw):
+    try:
+        old = json.loads(STATE_FILE.read_text())
+    except (OSError, ValueError):
+        old = {}
+    old.update(kw)
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(old))
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, STATE_FILE)
+
+
+def update(_args):
+    """Start the update in its own transient systemd unit: update.sh restarts the CuePlayer
+    service, which would otherwise kill this process half-way through."""
+    source()
+    r = subprocess.run(["systemctl", "is-active", "--quiet", "cueplayer-update.service"])
+    if r.returncode == 0:
+        die("an update is already running")
+    write_state(state="starting", started=time.time(), finished=None, message="starting")
+    r = subprocess.run(["systemd-run", "--unit=cueplayer-update", "--collect", "--quiet",
+                        "--description=CuePlayer update", os.path.realpath(__file__), "_run-update"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        write_state(state="failed", finished=time.time(), message=r.stderr.strip()[-300:])
+        die("could not start the update: " + r.stderr.strip()[-300:])
+    ok(state="started")
+
+
+def run_update(_args):
+    src = source()
+    with open(LOG_FILE, "w") as log:
+        os.chmod(LOG_FILE, 0o644)
+
+        def say(msg):
+            log.write(msg + "\n")
+            log.flush()
+        before = git(src, "rev-parse", "--short", "HEAD").stdout.strip()
+        write_state(state="pulling", source=str(src), previous=before, message="pulling from GitHub")
+        say(f"==> git pull in {src} (at {before})")
+        r = git(src, "pull", "--ff-only", timeout=300)
+        say((r.stdout + r.stderr).strip())
+        if r.returncode != 0:
+            write_state(state="failed", finished=time.time(),
+                        message="git pull failed (local changes on the unit?) - see the log")
+            return 1
+        after = git(src, "rev-parse", "--short", "HEAD").stdout.strip()
+        write_state(state="installing", current=after, message=f"installing {after}")
+        say(f"==> installing {after}")
+        # The freshly pulled update.sh does the install (and restarts the service)
+        r = subprocess.run(["bash", str(src / "deploy" / "update.sh"), "--no-pull"],
+                           stdout=log, stderr=subprocess.STDOUT)
+        if r.returncode != 0:
+            write_state(state="failed", finished=time.time(),
+                        message="install failed - previous version kept running; see the log")
+            return 1
+        write_state(state="done", finished=time.time(),
+                    message=f"updated {before} -> {after}" if before != after else "already up to date")
+        return 0
+
+
+def reboot(_args):
+    subprocess.Popen(["systemctl", "reboot"])
+    ok(rebooting=True)
+
+
+COMMANDS = {"hdmi-mode": hdmi_mode, "update-check": update_check, "update": update,
+            "_run-update": run_update, "reboot": reboot}
+
+if __name__ == "__main__":
+    if os.geteuid() != 0:
+        die("must run as root (sudo)")
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        die("usage: cueplayer-helper {" + "|".join(c for c in COMMANDS if not c.startswith("_")) + "}")
+    sys.exit(COMMANDS[sys.argv[1]](sys.argv[2:]) or 0)

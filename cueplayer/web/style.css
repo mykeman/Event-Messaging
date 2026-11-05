@@ -84,6 +84,7 @@ label.check { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .badge.cue, .badge.adhoc { background: var(--live); border-color: var(--live); color: #fff; }
 .badge.default { background: #14532d; border-color: #166534; color: #bbf7d0; }
 .badge.black { background: #000; color: #aaa; }
+.badge.feature { background: #4c1d95; border-color: #6d28d9; color: #ede9fe; }
 .badge.hold { background: #78350f; border-color: #92400e; color: #fde68a; }
 .badge.off { background: #3a1717; color: #fecaca; border-color: #5b2323; }
 .now { display: grid; gap: 6px; margin-top: 12px; }

@@ -196,11 +196,24 @@ class Transcoder:
         meta = item.get("probe") or {}
         if not meta.get("pix_fmt") and not meta.get("probed"):
             meta = self.lib.reprobe(item_id)
-        mode = "always" if force else tc.get("mode", "auto")
+        # transcode.mode "off" is the older way of turning conversion off
+        enabled = bool(tc.get("enabled", False)) and tc.get("mode") != "off"
+        mode = "always" if force else (tc.get("mode", "auto") if enabled else "off")
         a = analyse(meta, item["kind"], canvas, item.get("scale_mode") or gmode, hwinfo.detect(), mode)
         pb = item.get("playback") or {}
         if pb.get("skip") and not force:
             a = dict(a, needed=False)  # operator chose to play the original
+        if mode == "off":
+            # Automatic conversion is off: nothing new is converted, and copies made earlier
+            # (automatically or with Convert now) keep playing. Queued work is dropped.
+            if pb.get("status") in ("queued", "converting") and (
+                    item_id in self.pending or self.current == item_id):
+                self.cancel(item_id)
+            have_copy = bool(pb.get("file")) and (self.lib.media_dir / pb["file"]).exists()
+            self.lib.set_playback(item_id, status="ready" if have_copy else "original",
+                                  reasons=a["reasons"], disabled=True, skip=bool(pb.get("skip")))
+            self.notify(force=True)
+            return self.lib.get(item_id)
         if not a["needed"]:
             if pb.get("status") == "ready" and pb.get("target") != a["target"] and not pb.get("original_removed"):
                 self.lib.drop_playback_copy(item_id)   # copy no longer wanted (e.g. setting changed)
@@ -216,7 +229,7 @@ class Transcoder:
                                   error="ffmpeg with libx264 is not installed")
         else:
             self.lib.set_playback(item_id, status="queued", reasons=a["reasons"], target=a["target"],
-                                  progress=0, error=None, skip=False)
+                                  progress=0, error=None, skip=False, disabled=False)
             self.enqueue(item_id)
         self.notify(force=True)
         return self.lib.get(item_id)

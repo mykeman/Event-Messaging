@@ -111,6 +111,42 @@ def create_player_app(ctrl: Controller) -> FastAPI:
             overrides["after"] = o["after"]
         return run(ctrl.play_cue, ref, **overrides)
 
+    # ---- feature screening ----------------------------------------------------------
+    @app.get("/api/feature", dependencies=[api])
+    def feature():
+        """The feature: state (playing | interrupted | finished | stopped), position,
+        duration, remaining (seconds) and progress (0-1). null when none was started."""
+        return ctrl.feature_status()
+
+    @app.api_route("/api/feature/play", methods=["GET", "POST"], dependencies=[api])
+    async def feature_play(p: Dict[str, Any] = Depends(params)):
+        ref = p.get("media") or p.get("id") or p.get("name")
+        if not ref:
+            raise HTTPException(400, "media is required")
+        return run(ctrl.play_feature, ref, p.get("start") or p.get("at") or 0,
+                   str(p.get("source") or "api"), as_bool(p.get("force", False)),
+                   transition_params(p)[1])
+
+    @app.api_route("/api/feature/play/{ref}", methods=["GET", "POST"], dependencies=[api])
+    async def feature_play_ref(ref: str, p: Dict[str, Any] = Depends(params)):
+        return run(ctrl.play_feature, ref, p.get("start") or p.get("at") or 0,
+                   str(p.get("source") or "api"), as_bool(p.get("force", False)),
+                   transition_params(p)[1])
+
+    @app.api_route("/api/feature/stop", methods=["GET", "POST"], dependencies=[api])
+    async def feature_stop(p: Dict[str, Any] = Depends(params)):
+        """End the feature; then=default (Normal playlist) | black | hold."""
+        return run(ctrl.feature_stop, p.get("then"), as_int(p.get("transition")))
+
+    @app.api_route("/api/feature/resume", methods=["GET", "POST"], dependencies=[api])
+    async def feature_resume(p: Dict[str, Any] = Depends(params)):
+        return run(ctrl.feature_resume, as_bool(p.get("force", False)))
+
+    @app.api_route("/api/feature/seek", methods=["GET", "POST"], dependencies=[api])
+    async def feature_seek(p: Dict[str, Any] = Depends(params)):
+        """position=seconds or h:mm:ss"""
+        return run(ctrl.feature_seek, p.get("position") if p.get("position") is not None else p.get("to"))
+
     # ---- playlists & schedule ------------------------------------------------------
     @app.get("/api/playlists", dependencies=[api])
     def playlists():
@@ -318,6 +354,7 @@ def create_player_app(ctrl: Controller) -> FastAPI:
     @app.delete("/api/media/{item_id}", dependencies=[api])
     def media_delete(item_id: str):
         tc.cancel(item_id)
+        ctrl.media_removed(item_id)   # a feature using it ends first, so Normal can take over
         if (ctrl.state.get("media") or {}).get("id") == item_id:
             ctrl.stop(0)
         if not lib.delete(item_id):
@@ -389,12 +426,44 @@ def create_player_app(ctrl: Controller) -> FastAPI:
         body = await request.json()
         if not isinstance(body, dict):
             raise HTTPException(400, "expected an object")
+        mode_of = lambda d: (d.get("width"), d.get("height"), d.get("refresh"))  # noqa: E731
+        before = mode_of(settings.section("display"))
         try:
             out = ctrl.apply_settings(body)
         except ValueError as e:
             raise HTTPException(400, str(e))
         bus.publish({"event": "settings"})
+        disp = settings.section("display")
+        if mode_of(disp) != before and disp.get("sink") in ("auto", "kms"):
+            asyncio.ensure_future(_write_boot_mode(disp))
         return out
+
+    async def _write_boot_mode(disp: Dict[str, Any]) -> None:
+        """Make the HDMI mode stick across reboots (kernel command line, via the helper)."""
+        from . import system
+        port = (ctrl.engine.status or {}).get("display_port")
+        try:
+            r = await asyncio.get_running_loop().run_in_executor(
+                None, system.set_boot_mode, disp["width"], disp["height"], disp.get("refresh") or 0, port)
+        except system.SystemJobError as e:
+            log.warning("could not set the HDMI boot mode: %s", e)
+            bus.publish({"event": "error", "error": f"HDMI mode saved, but not set for boot: {e}"})
+            return
+        log.info("HDMI boot mode set: %s on %s (%s)", r.get("mode"), r.get("port"), r.get("file"))
+        hz = disp.get("refresh") or 0
+        bus.publish({"event": "notice", "boot_mode": r,
+                     "message": f"HDMI {disp['width']}×{disp['height']}" + (f"@{hz:g} Hz" if hz else " (auto rate)")
+                                + f" set for {r.get('port')} - reboot to apply"})
+
+    @app.get("/api/display/modes", dependencies=[api])
+    def display_modes():
+        """Resolutions the connected screen reports (plus common ones), refresh rates, and
+        the mode the HDMI port is set to at boot."""
+        from . import system
+        return system.display_modes((ctrl.engine.status or {}).get("display_port"))
+
+    from . import system as _system
+    _system.add_routes(app, [api], bus.publish)
 
     # ---- AES67 ------------------------------------------------------------
     @app.get("/api/aes67.sdp", dependencies=[api])

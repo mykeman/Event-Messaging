@@ -76,7 +76,7 @@ fi
 if [[ "$TAKE_HDMI" == 1 ]]; then
   [[ "$ROLE" == player ]] || { echo "--take-hdmi only applies to --role player"; exit 1; }
   [[ "$HDMI_MODE" =~ ^([0-9]+)x([0-9]+)@([0-9]+)$ ]] || { echo "--hdmi-mode must look like 1920x1080@60"; exit 1; }
-  HDMI_W=${BASH_REMATCH[1]}; HDMI_H=${BASH_REMATCH[2]}
+  HDMI_W=${BASH_REMATCH[1]}; HDMI_H=${BASH_REMATCH[2]}; HDMI_HZ=${BASH_REMATCH[3]}
   if [[ -z "$HDMI_PORT" ]]; then
     # Use the port a display is actually plugged into (it has an EDID). Forcing the wrong
     # port on sends the video to an empty socket while the screen shows a blank console.
@@ -98,7 +98,7 @@ echo "==> Installing CuePlayer ($ROLE) from $SRC to $PREFIX"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-PKGS=(python3 python3-venv python3-pip ffmpeg ca-certificates curl
+PKGS=(python3 python3-venv python3-pip ffmpeg ca-certificates curl git sudo
       avahi-daemon   # mDNS: NDI discovery on Linux needs it; also gives <host>.local names
       alsa-utils)    # amixer: HDMI outputs on Intel/AMD start muted
 if [[ "$ROLE" == player ]]; then
@@ -144,6 +144,7 @@ fi
 "$PREFIX/venv/bin/pip" install --upgrade pip >/dev/null
 "$PREFIX/venv/bin/pip" install -r "$PREFIX/requirements.txt"
 chown -R "$SVC_USER:$SVC_USER" "$DATA"
+"$SRC/deploy/install-helper.sh" "$SRC" "$PREFIX" "$SVC_USER"
 
 # systemd
 cat > /etc/systemd/system/cueplayer.service <<EOF
@@ -237,14 +238,14 @@ EOF
   fi
 
   # Player output: direct KMS at the HDMI mode (keeps any other existing settings)
-  python3 - "$DATA/settings.json" "$HDMI_W" "$HDMI_H" <<'EOF'
+  python3 - "$DATA/settings.json" "$HDMI_W" "$HDMI_H" "$HDMI_HZ" <<'EOF'
 import json, sys
-path, w, h = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+path, w, h, hz = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 try:
     data = json.load(open(path))
 except (OSError, ValueError):
     data = {}
-data.setdefault("display", {}).update(enabled=True, sink="kms", width=w, height=h)
+data.setdefault("display", {}).update(enabled=True, sink="kms", width=w, height=h, refresh=hz)
 json.dump(data, open(path, "w"), indent=2)
 EOF
   chown "$SVC_USER:$SVC_USER" "$DATA/settings.json"

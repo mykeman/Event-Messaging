@@ -621,6 +621,9 @@ def create_master_app(fleet: Fleet) -> FastAPI:
             return
         await bus.serve(websocket, {"event": "hello", "role": "master"})
 
+    from . import system as _system
+    _system.add_routes(app, [api], bus.publish)
+
     @app.get("/", include_in_schema=False)
     def index():
         return FileResponse(WEB_DIR / "master.html")

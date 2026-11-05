@@ -360,9 +360,14 @@ class BaseEngine:
 
     def play(self, path: str, kind: str, scale_mode: str, fade_ms: int,
              duration_hint: float = 0, sw_decode: bool = False, transition: str = "fade",
-             preroll_ms: Optional[int] = None) -> int:
-        """sw_decode: don't use hardware decoders for this clip (after one failed on it)."""
+             preroll_ms: Optional[int] = None, start_s: float = 0) -> int:
+        """sw_decode: don't use hardware decoders for this clip (after one failed on it).
+        start_s: start a video this many seconds in (resuming a feature)."""
         raise NotImplementedError
+
+    def clip_position(self, cid: Any) -> Optional[float]:
+        """Seconds into the file of the clip's latest frame on screen, if known."""
+        return None
 
     def black(self, fade_ms: int) -> None: ...
 
@@ -420,12 +425,18 @@ class MockEngine(BaseEngine):
     def rebuild(self, settings):
         self.start(settings)
 
+    def stop(self):
+        for t in self._timers.values():
+            t.cancel()
+        self._timers.clear()
+
     def play(self, path, kind, scale_mode, fade_ms, duration_hint=0, sw_decode=False,
-             transition="fade", preroll_ms=None):
+             transition="fade", preroll_ms=None, start_s=0):
         cid = next(self._ids)
         for t in self._timers.values():
             t.cancel()
         self._timers.clear()
+        self._pos = {cid: (float(start_s or 0), time.time())}
         # Test hooks: files starting with these markers fail like a broken file, or like a
         # hardware decoder rejecting the stream (plays fine in software)
         try:
@@ -442,19 +453,25 @@ class MockEngine(BaseEngine):
         self.status["video_decoder"] = "avdec_h264 (mock)" if sw_decode else "mock"
         threading.Timer(0.05, lambda: self._emit(type="clip_started", clip=cid)).start()
         if kind == "video":
-            t = threading.Timer(duration_hint or 10.0,
+            t = threading.Timer(max(0.05, (duration_hint or 10.0) - float(start_s or 0)),
                                 lambda: self._emit(type="clip_ended", clip=cid))
             t.start()
             self._timers[cid] = t
         return cid
 
+    def clip_position(self, cid):
+        start, t0 = getattr(self, "_pos", {}).get(cid, (None, 0))
+        return None if start is None else start + (time.time() - t0)
+
     def black(self, fade_ms):
         for t in self._timers.values():
             t.cancel()
         self._timers.clear()
+        self._pos = {}
 
     def play_pattern(self, pattern, fade_ms, label=None, tone=False, transition="fade"):
         cid = next(self._ids)
+        self._pos = {}
         for t in self._timers.values():
             t.cancel()
         self._timers.clear()
@@ -506,6 +523,11 @@ class _Clip:
         self.blank_dropped = 0
         self.transition = "fade"
         self.geom = (0, 0, 0, 0)  # x, y, w, h on the canvas
+        self.start_ns = 0         # resume point: seek here before the first frame is shown
+        self.seek_sent = False
+        self.seek_done = True
+        self.pos_ns: Optional[int] = None  # stream time of the latest frame through the clip
+        self.preroll_ns = 0
         self.lock = threading.Lock()
 
 
@@ -590,11 +612,18 @@ class GstEngine(BaseEngine):
         self._idle(self._teardown)
 
     def play(self, path, kind, scale_mode, fade_ms, duration_hint=0, sw_decode=False,
-             transition="fade", preroll_ms=None):
+             transition="fade", preroll_ms=None, start_s=0):
         cid = next(self._ids)
         self._idle(self._play, cid, path, kind, scale_mode, fade_ms, sw_decode, None, False,
-                   transition, preroll_ms)
+                   transition, preroll_ms, start_s)
         return cid
+
+    def clip_position(self, cid):
+        clip = self.clips.get(cid) if isinstance(cid, int) else None
+        if clip is None or clip.pos_ns is None:
+            return None
+        # Frames pass the clip about one pre-roll ahead of being shown
+        return max(0.0, (clip.pos_ns - clip.preroll_ns) / Gst.SECOND)
 
     def play_pattern(self, pattern, fade_ms, label=None, tone=False, transition="fade"):
         cid = next(self._ids)
@@ -915,16 +944,29 @@ class GstEngine(BaseEngine):
         self.status.pop("display_warning", None)
         self.status.pop("display_format", None)
         self.status.pop("display_refresh", None)
+        self.status.pop("display_pending", None)
         if kind == "kms":
             # kmssink's own modesetting picks the first mode with the right resolution,
             # which is nearly always 60 Hz. "keep" reuses the mode set at boot
             # (install.sh --take-hdmi) so its refresh rate is honoured - experimental: on
             # some Pi setups kmssink then draws nothing, so it's opt-in.
             boot = [m for m in boot_video_modes().values() if m[:2] == (dw, dh)]
+            want_hz = float(disp.get("refresh") or 0)
+            boot_match = [m for m in boot if want_hz and abs(m[2] - want_hz) < 0.5]
+            if want_hz and not boot_match:
+                self.status["display_pending"] = (
+                    f"HDMI {dw}x{dh}@{want_hz:g}Hz is saved and applies after a reboot")
+            else:
+                self.status.pop("display_pending", None)
+            # A refresh rate other than kmssink's usual 60 Hz is only possible by reusing the
+            # boot mode (kmssink can't choose a refresh rate itself)
+            reuse_boot = bool(boot_match) and abs(boot_match[0][2] - 60) >= 0.5
+            if boot_match:
+                boot = boot_match
             # Ways to drive the screen, tried in turn when the display output fails to start
             # (e.g. a screen without EDID has no mode list, so setting a mode is impossible
             # but reusing the console's current mode works).
-            if disp.get("modeset", "auto") == "keep":
+            if disp.get("modeset", "auto") == "keep" or reuse_boot:
                 attempts = [(False, True), (True, True), (True, False), (False, False)]
             else:
                 attempts = [(True, True), (True, False), (False, False), (False, True)]
@@ -936,6 +978,7 @@ class GstEngine(BaseEngine):
             found = detect_display_connector()
             if found:
                 self._display_port = found[1]
+                self.status["display_port"] = found[1]
             if int(disp.get("connector_id") or 0) > 0:
                 sink.set_property("connector-id", int(disp["connector_id"]))
                 port_note = f"connector {int(disp['connector_id'])}"
@@ -958,10 +1001,8 @@ class GstEngine(BaseEngine):
                 self.status["display_warning"] = (
                     f"A {fps:g} fps canvas on a {refresh:g} Hz output judders. "
                     + (f"Set the canvas (and content) to "
-                       f"{int(refresh) if fps * 2 > refresh else int(refresh / 2)} fps, or try "
-                       f"Display mode 'keep' with install.sh --take-hdmi --hdmi-mode {dw}x{dh}@{fps:g}."
-                       if not keep else
-                       f"Re-run install.sh --take-hdmi --hdmi-mode {dw}x{dh}@{fps:g} and reboot."))
+                       f"{int(refresh) if fps * 2 > refresh else int(refresh / 2)} fps, or set "
+                       f"Settings > Display > Refresh rate to {fps:g} Hz and reboot."))
         elif kind == "gl":
             sink = self._make("glimagesink")
         elif kind == "x":
@@ -1259,7 +1300,7 @@ class GstEngine(BaseEngine):
 
     def _play(self, cid, path, kind, scale_mode, fade_ms, sw_decode=False,
               label: Optional[str] = None, tone: bool = False, transition: str = "fade",
-              preroll_ms: Optional[int] = None) -> None:
+              preroll_ms: Optional[int] = None, start_s: float = 0) -> None:
         if self.pipeline is None:
             self._emit(type="clip_error", clip=cid, error="pipeline not running")
             return
@@ -1273,6 +1314,9 @@ class GstEngine(BaseEngine):
         clip.path = path
         clip.transition = transition if transition in TRANSITIONS else "fade"
         clip.preroll_ms = preroll_ms
+        if kind == "video" and start_s and start_s > 0.05:
+            clip.start_ns = int(start_s * Gst.SECOND)
+            clip.seek_done = False
         if pattern:
             src = self._pattern_source(b, path, label, out)
         else:
@@ -1408,7 +1452,38 @@ class GstEngine(BaseEngine):
             fmt = caps.get_structure(0).get_value("format") if caps and caps.get_size() else ""
             return looks_blank_yuv(lambda off, n: buf.extract_dup(off, n), buf.get_size(), fmt or "")
 
+        def stream_ns(pad, buf) -> Optional[int]:
+            ev = pad.get_sticky_event(Gst.EventType.SEGMENT, 0)
+            if ev is None or buf.pts == Gst.CLOCK_TIME_NONE:
+                return None
+            t = ev.parse_segment().to_stream_time(Gst.Format.TIME, buf.pts)
+            return None if t == Gst.CLOCK_TIME_NONE or t < 0 else t
+
+        def do_seek():
+            # Flushing seek from the main loop (never from a streaming thread). Sent upstream
+            # from the video converter; the demuxer moves every stream of the file.
+            flags = Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE
+            ok = vconv.send_event(Gst.Event.new_seek(1.0, Gst.Format.TIME, flags, Gst.SeekType.SET,
+                                                     clip.start_ns, Gst.SeekType.NONE, 0))
+            if not ok:
+                log.warning("clip %s: seek to %.1fs failed - playing from the start", cid,
+                            clip.start_ns / Gst.SECOND)
+                self._emit(type="notice", message="Couldn't resume at the saved position - "
+                                                  "playing from the start")
+                clip.seek_done = True
+            return False
+
         def first_buffer(pad, info):
+            if not clip.seek_done:
+                # Resuming: drop what decodes before the seek lands, then carry on as usual
+                if not clip.seek_sent:
+                    clip.seek_sent = True
+                    GLib.idle_add(do_seek)
+                    return Gst.PadProbeReturn.DROP
+                t = stream_ns(pad, info.get_buffer())
+                if t is None or t < clip.start_ns - 2 * Gst.SECOND:
+                    return Gst.PadProbeReturn.DROP
+                clip.seek_done = True
             if pad is vsrcpad and bad_frame(pad, info.get_buffer()):
                 clip.blank_dropped += 1
                 self._frames["blank"] = self._frames.get("blank", 0) + 1
@@ -1427,6 +1502,7 @@ class GstEngine(BaseEngine):
                     # happens once that frame is due (see _clip_started).
                     want = clip.preroll_ms if clip.preroll_ms is not None else out.get("preroll_ms", 300)
                     preroll = max(40, min(3000, int(want))) * Gst.MSECOND
+                    clip.preroll_ns = preroll
                     now_rt = self._running_time()
                     offset = now_rt - rt + preroll
                     clip.due_rt = now_rt + preroll
@@ -1466,9 +1542,13 @@ class GstEngine(BaseEngine):
         vsrcpad.add_probe(Gst.PadProbeType.BUFFER, frame_filter)
         clip_pad = vsrcpad
 
-        def clip_frames(_pad, _info):
+        def clip_frames(pad, info):
             if self.visible is clip or not self.visible:
                 self._frames["clip"] = self._frames.get("clip", 0) + 1
+            if kind == "video" and clip.seek_done:
+                t = stream_ns(pad, info.get_buffer())
+                if t is not None:
+                    clip.pos_ns = t
             return Gst.PadProbeReturn.OK
 
         clip_pad.add_probe(Gst.PadProbeType.BUFFER, clip_frames)

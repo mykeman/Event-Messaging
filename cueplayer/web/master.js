@@ -313,6 +313,7 @@ async function init() {
     await Promise.all([loadGcues(), loadCues()]);
   } catch (e) { console.error(e); return; }
   renderSettings();
+  initSoftwareUpdate($("#sw-update"));
   const info = await api("GET", "/api/info");
   $("#disk").textContent = `Master library ${fmtBytes(info.disk.library_bytes)} · ${fmtBytes(info.disk.free_bytes)} free`;
 

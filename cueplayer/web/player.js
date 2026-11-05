@@ -10,16 +10,18 @@ const SETTINGS_FORM = [
       ["scale_mode", "Scale media", "select", ["fit", "fill", "stretch", "none"]],
       ["hw_decode", "Hardware decode", "check"], ["latency_ms", "Latency budget (ms)", "number"],
       ["preroll_ms", "Pre-roll (ms)", "number"]] },
-  { section: "display", title: "Display output (HDMI)", note: "Display mode and where the canvas is placed. Out width/height 0 = canvas size (1:1). Display mode: auto lets the player set the HDMI mode (usually 60 Hz); keep reuses the mode from install.sh --take-hdmi --hdmi-mode, e.g. 50 Hz.",
+  { section: "display", title: "Display output (HDMI)", note: "HDMI frame size and refresh rate, and where the canvas is placed. The mode is saved and set for boot, so it survives a reboot; a new refresh rate takes effect after rebooting (Settings > Software update > Reboot). Out width/height 0 = canvas size (1:1). Display mode keep: always reuse the boot mode.",
+    displayPresets: true,
     fields: [["enabled", "Enabled", "check"], ["sink", "Video sink", "select", ["auto", "kms", "gl", "x", "wayland", "fb", "none"]],
       ["width", "Display width", "number"], ["height", "Display height", "number"],
+      ["refresh", "Refresh rate", "select", [[0, "Auto (usually 60 Hz)"], [24, "24 Hz"], [25, "25 Hz"], [30, "30 Hz"], [50, "50 Hz"], [60, "60 Hz"]]],
       ["x", "Offset X", "number"], ["y", "Offset Y", "number"],
       ["out_width", "Out width", "number"], ["out_height", "Out height", "number"],
       ["connector_id", "DRM connector (0 = auto)", "number"],
       ["modeset", "Display mode (kms)", "select", ["auto", "keep"]]] },
   { section: "ndi", title: "NDI output", fields: [["enabled", "Enabled", "check"], ["name", "Source name", "text", null, "wide"]] },
-  { section: "transcode", title: "Media conversion", note: "Files this unit would struggle to play (codec, size, frame rate, 10-bit, interlaced) get an optimised H.264 copy in the background. The original plays until it's ready.",
-    fields: [["mode", "Mode", "select", ["auto", "always", "off"]], ["keep_original", "Keep originals", "check"],
+  { section: "transcode", title: "Media conversion", note: "Automatic conversion (off by default): files this unit would struggle to play (codec, size, frame rate, 10-bit, interlaced) get an optimised H.264 copy in the background, and the original plays until it's ready. When off, files play as uploaded; Convert now on a file (Media > Edit) still makes a copy.",
+    fields: [["enabled", "Automatic conversion", "check"], ["mode", "When on, convert", "select", [["auto", "files that need it"], ["always", "every file"]]], ["keep_original", "Keep originals", "check"],
       ["crf", "Quality (CRF)", "number"], ["preset", "Speed preset", "select", ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium"]],
       ["threads", "Threads (0 = auto)", "number"]] },
   { section: "transition", title: "Transitions", note: "Default between items: cut, crossfade (fade), dip to black, or slide (the new item pushes the old one off). Cues can override it.",
@@ -34,6 +36,12 @@ const SETTINGS_FORM = [
       ["ptime_ms", "Packet time (ms)", "select", [1, 0.125, 0.25, 4]], ["ptp_domain", "PTP domain", "number"],
       ["ttl", "TTL", "number"], ["dscp", "Media DSCP", "number"],
       ["session_name", "Session name", "text", null, "wide"]] },
+  { section: "feature", title: "Feature screening", note: "A film started from the Live tab, the API (/api/feature/play/<media>) or the schedule. An emergency message, cue or Black pauses it at its position; it carries on from there when cleared with Normal. Q-SYS gets FEATURE position lines over TCP and FEATURE state=finished when it ends.",
+    fields: [["after", "When it ends", "select", [["default", "Normal playlist"], ["black", "Black"], ["hold", "Hold last frame"]]],
+      ["rewind_s", "Rewind on resume (s)", "number"], ["resume_after_restart", "Resume after a restart", "check"],
+      ["position_interval_s", "Position updates every (s)", "number"],
+      ["notify_url", "Webhook URL (optional, {event} = event name)", "text", null, "wide"],
+      ["notify_method", "Webhook method", "select", ["POST", "GET"]]] },
   { section: "schedule", title: "Schedule", note: "Timezone for schedule times, e.g. Australia/Melbourne. Blank = the unit's system clock (often UTC on a server install).",
     fields: [["timezone", "Timezone", "text", null, "wide"]] },
   { section: "preview", title: "Web preview", fields: [["enabled", "Enabled", "check"], ["fps", "FPS", "number"], ["width", "Width", "number"]] },
@@ -71,6 +79,7 @@ function renderStatus() {
   $("#st-frames").title = "Frames per second at each stage: the playing clip, the compositor, and the HDMI output. A stage at 0 while the one before is running shows where playback stalls.";
   $("#st-frames").style.color = dropped ? "var(--warn)" : "";
   if ($("#aes67-status")) $("#aes67-status").textContent = aes67Status();
+  if ($("#display-mode-status")) $("#display-mode-status").textContent = displayModeStatus();
   $("#canvas-info").textContent = (eng.canvas || "") + (eng.backend ? " · " + eng.backend : "");
   const errs = (eng.errors || []).slice(-3).reverse();
   $("#st-errors").replaceChildren(...errs.map(e => el("div", {}, new Date(e.t * 1000).toLocaleTimeString() + " " + e.msg)));
@@ -80,6 +89,7 @@ function renderStatus() {
   if (st.mode === "default") $("#now-badge").replaceChildren(el("span", { class: "badge default" }, "normal"));
   $$(".media[data-id]").forEach(c => c.classList.toggle("playing", !!m && c.dataset.id === m.id));
   tickProgress();
+  renderFeature();
 }
 function tickProgress() {
   const st = S.status;
@@ -382,7 +392,7 @@ function renderSettingsForms() {
     const grid = el("div", { class: "form-grid" }, ...sec.fields.map(([key, label, type, opts, cls]) => {
       let input;
       const v = vals[key];
-      if (type === "select") input = el("select", {}, ...opts.map(o => el("option", { value: o, selected: String(o) === String(v) }, o)));
+      if (type === "select") input = el("select", {}, ...opts.map(o => Array.isArray(o) ? o : [o, o]).map(([ov, ol]) => el("option", { value: ov, selected: String(ov) === String(v) }, ol)));
       else if (type === "iface") {
         const list = (S.ifaces || []).map(i => [i.name, `${i.name} — ${i.ipv4.join(", ")}`]);
         if (v && !list.find(([n]) => n === v)) list.push([v, `${v} (not found)`]);
@@ -399,9 +409,10 @@ function renderSettingsForms() {
     const presets = sec.presets ? el("div", { class: "row", style: { marginBottom: "10px" } }, ...sec.presets.map(([l, w, h]) =>
       el("button", { class: "small", onclick: () => {
         $(`[data-s="output"][data-k="canvas_width"]`).value = w; $(`[data-s="output"][data-k="canvas_height"]`).value = h; updateDiagram();
-      } }, l))) : null;
+      } }, l))) : sec.displayPresets ? displayPresets() : null;
     const status = sec.section === "ndi" ? el("div", { class: "small muted", style: { marginTop: "8px" } }, "Status: " + ((S.status && S.status.engine.ndi) || "—"))
-      : sec.section === "aes67" ? el("div", { id: "aes67-status", class: "small muted", style: { marginTop: "8px" } }, aes67Status()) : null;
+      : sec.section === "aes67" ? el("div", { id: "aes67-status", class: "small muted", style: { marginTop: "8px" } }, aes67Status())
+      : sec.section === "display" ? el("div", { id: "display-mode-status", class: "small muted", style: { marginTop: "8px" } }, displayModeStatus()) : null;
     return el("div", { class: "card" }, el("h2", {}, sec.title),
       sec.note ? el("p", { class: "small muted", style: { marginTop: 0 } }, sec.note) : null, presets, grid, status);
   }));
@@ -413,6 +424,31 @@ function renderSettingsForms() {
     if (prof.value === "aes67" && dom.value === "127") dom.value = 0;
   });
   updateDiagram();
+}
+
+/* HDMI frame sizes: what the connected screen reports first, then common sizes */
+function displayPresets() {
+  const dm = S.modes || {};
+  const reported = (dm.reported || []).slice(0, 8);
+  const sizes = reported.length ? reported : ["3840x2160", "1920x1080", "1280x720"];
+  return el("div", { class: "row", style: { marginBottom: "10px" } },
+    el("span", { class: "small muted" }, reported.length ? `Screen on ${dm.port} supports:` : "Sizes:"),
+    ...sizes.map(m => el("button", { class: "small", onclick: () => {
+      const [w, h] = m.split("x");
+      $(`[data-s="display"][data-k="width"]`).value = w; $(`[data-s="display"][data-k="height"]`).value = h; updateDiagram();
+    } }, m.replace("x", "×"))));
+}
+
+function displayModeStatus() {
+  const dm = S.modes || {}, eng = (S.status && S.status.engine) || {};
+  const boot = dm.boot_modes || {};
+  const parts = [];
+  const bootTxt = Object.entries(boot).map(([p, m]) => `${p} ${m.replace("x", "×")}`).join(", ");
+  parts.push("Set at boot: " + (bootTxt || "nothing (the screen's preferred mode)"));
+  if (eng.display_refresh) parts.push(`running at ${eng.display_refresh} Hz`);
+  if (eng.display_pending) parts.push("⚠ " + eng.display_pending);
+  if (dm.helper) parts.push("Can't set the boot mode: " + dm.helper);
+  return parts.join(" · ");
 }
 
 function aes67Status() {
@@ -464,7 +500,7 @@ async function loadInfo() {
   try { S.hw = await api("GET", "/api/hardware", undefined, { quiet: true }); } catch { S.hw = null; }
   if (S.hw) {
     const out = S.settings.output, tc = S.settings.transcode || {};
-    $("#hw-line").textContent = `This unit: ${S.hw.summary}. ` + (tc.mode === "off" ? "Conversion is off." :
+    $("#hw-line").textContent = `This unit: ${S.hw.summary}. ` + (!tc.enabled || tc.mode === "off" ? "Automatic conversion is off (Settings > Media conversion) - files play as uploaded." :
       `Files are optimised for ${out.canvas_width}×${out.canvas_height}@${out.framerate} H.264` + (S.hw.converting ? " · converting now" : "") + (S.hw.queued ? ` · ${S.hw.queued} queued` : "") + ".");
   }
   $("#unit-name").textContent = S.info.name;
@@ -488,19 +524,25 @@ function renderApiDocs() {
     `GET ${base}/api/play/<media id or name>?after=hold`, `GET ${base}/api/default`,
     `GET ${base}/api/black?transition=1000`, `GET ${base}/api/next`, `GET ${base}/api/status`,
     `POST ${base}/api/media   (multipart: file, category=event|library)`,
-    `GET ${base}/api/preview.mjpg   (live MJPEG preview)`].join("\n");
+    `GET ${base}/api/preview.mjpg   (live MJPEG preview)`,
+    ``, `# Feature screening`, `GET ${base}/api/feature/play/<media>?start=0:10:00`, `GET ${base}/api/feature   (state, position, remaining)`,
+    `GET ${base}/api/feature/stop?then=default|black|hold`, `GET ${base}/api/feature/resume`, `GET ${base}/api/feature/seek?position=1:02:03`].join("\n");
   $("#api-tcp").textContent = [
     `# TCP ${location.hostname}:${c.tcp_port}   UDP ${location.hostname}:${c.udp_port}`,
     `AUTH <token>          (only if a token is set)`,
     `CUE 3`, `CUE 3 LOOP`, `PLAY "Welcome Slide" HOLD`, `PLAY gala DURATION=30 AFTER=cue:1`,
     `STOP | DEFAULT | BLACK FADE=1000 | NEXT`, `STATUS`, `EVENTS OFF`,
+    `FEATURE "Big Film" START=0:10:00`, `FEATURE STOP | FEATURE RESUME | FEATURE SEEK 1:02:03 | FEATURE STATUS`,
     ``, `> OK mode=cue cue=3 media="Welcome" id=… kind=video`,
-    `> EVENT mode=default cue="" media="Loop A" …`].join("\n");
+    `> EVENT mode=default cue="" media="Loop A" …`,
+    `> FEATURE state=playing pos=1834.2 dur=5400.0 remain=3565.8 progress=0.3397 media="Film" …   (every second)`,
+    `> FEATURE event=finished state=finished …   (once, when the film ends)`].join("\n");
 }
 
 /* ---------------- loading ---------------- */
-async function loadMedia() { S.media = await api("GET", "/api/media"); renderLibrary(); renderQuick(); renderLiveCues(); if (S.settings) renderDefault(); syncConversionJobs(); }
+async function loadMedia() { S.media = await api("GET", "/api/media"); renderLibrary(); renderQuick(); renderLiveCues(); if (S.settings) renderDefault(); syncConversionJobs(); featureMediaOptions(); }
 async function loadCues() { S.cues = await api("GET", "/api/cues"); renderLiveCues(); renderCues(); }
+async function loadModes() { try { S.modes = await api("GET", "/api/display/modes", undefined, { quiet: true }); } catch { S.modes = null; } }
 async function loadSettings() { S.settings = await api("GET", "/api/settings"); S.defList = [...(S.settings.playback.default_playlist || [])]; }
 
 async function init() {
@@ -508,13 +550,16 @@ async function init() {
     S.status = await api("GET", "/api/status");
     await loadSettings();
     await Promise.all([loadMedia(), loadCues(), loadInfo(),
-      api("GET", "/api/network/interfaces", undefined, { quiet: true }).then(l => { S.ifaces = l; }).catch(() => { S.ifaces = []; })]);
+      api("GET", "/api/network/interfaces", undefined, { quiet: true }).then(l => { S.ifaces = l; }).catch(() => { S.ifaces = []; }),
+      loadModes()]);
   } catch (e) { console.error(e); return; }
   renderDefault();
   renderSettingsForms();
   renderApiDocs();
   renderStatus();
   startPreview();
+  initSoftwareUpdate($("#sw-update"));
+  initFeature();
 
   $("#btn-default").onclick = () => api("POST", "/api/default");
   $("#btn-black").onclick = () => api("POST", "/api/black");
@@ -551,6 +596,7 @@ async function init() {
     if (msg.event === "settings") { await loadSettings(); renderDefault(); }
     if (msg.event === "error") toast(msg.error, "err");
     if (msg.event === "notice") toast(msg.message, "ok");
+    if (msg.event === "notice" && msg.boot_mode) loadModes().then(renderStatus);
   }, on => {
     $("#conn-dot").classList.toggle("on", on);
     $("#conn-text").textContent = on ? "live" : "reconnecting";
@@ -566,3 +612,58 @@ async function init() {
 
 initTabs(name => { if (name === "live") startPreview(); if (name === "schedule" && typeof loadSchedule === "function") loadSchedule(); });
 init();
+
+/* ---------------- feature screening ---------------- */
+function featureMediaOptions() {
+  const sel = $("#feature-media");
+  if (!sel) return;
+  const cur = sel.value;
+  const vids = S.media.filter(m => m.kind === "video");
+  sel.replaceChildren(el("option", { value: "" }, vids.length ? "— choose a video —" : "No videos uploaded"),
+    ...vids.map(m => el("option", { value: m.id, selected: m.id === cur }, m.name + (m.duration ? `  (${fmtDur(m.duration)})` : ""))));
+}
+
+function renderFeature() {
+  const f = S.status && S.status.feature;
+  const box = $("#feature-now");
+  if (!box) return;
+  const active = f && ["playing", "interrupted"].includes(f.state);
+  box.classList.toggle("hidden", !f || f.state === "stopped");
+  $("#feature-badge").replaceChildren(f ? el("span", { class: "badge " + (f.state === "playing" ? "feature" : f.state === "interrupted" ? "hold" : "") }, f.state) : "");
+  if (!f) return;
+  $("#feature-title").textContent = (f.media || {}).name || "";
+  tickFeature();
+  $("#feature-note").textContent = f.state === "interrupted"
+    ? (S.status.lock ? `Paused by ${f.interrupted_by || "a scenario"} — resumes when it's cleared (Normal).` : `Paused (${f.interrupted_by || "interrupted"}) — press Normal or Resume to carry on.`)
+    : f.state === "finished" ? "Finished" + (f.finished_at ? " at " + new Date(f.finished_at * 1000).toLocaleTimeString() : "") : "";
+  $("#feature-resume").classList.toggle("hidden", !(f.state === "interrupted" && !S.status.lock));
+  $("#feature-stop").disabled = !active;
+  $("#feature-seek").disabled = !active;
+}
+
+/* Smooth position between status updates */
+function tickFeature() {
+  const f = S.status && S.status.feature;
+  if (!f || !$("#feature-time")) return;
+  let pos = f.position || 0;
+  if (f.state === "playing" && S.status.mode === "feature" && S.status.started) pos = Math.min(f.duration || Infinity, Date.now() / 1000 - S.status.started);
+  $("#feature-time").textContent = fmtDur(pos) + (f.duration ? " / " + fmtDur(f.duration) + " · " + fmtDur(f.duration - pos) + " left" : "");
+  $("#feature-progress").style.width = f.duration ? Math.min(100, pos / f.duration * 100) + "%" : "0";
+}
+setInterval(tickFeature, 500);
+
+function initFeature() {
+  featureMediaOptions();
+  $("#feature-play").onclick = () => {
+    const id = $("#feature-media").value;
+    if (!id) return toast("Choose the video to screen", "err");
+    const f = S.status && S.status.feature;
+    const go = () => api("POST", "/api/feature/play/" + encodeURIComponent(id), { start: $("#feature-start").value.trim() || 0, source: "gui" })
+      .then(() => toast("Feature started", "ok"));
+    if (f && ["playing", "interrupted"].includes(f.state)) confirmDo(`Replace "${(f.media || {}).name}" with this feature?`, go); else go();
+  };
+  $("#feature-stop").onclick = () => confirmDo("Stop the feature and go back to the Normal playlist?", () => api("POST", "/api/feature/stop"));
+  $("#feature-resume").onclick = () => api("POST", "/api/feature/resume");
+  $("#feature-seek").onclick = () => { const v = $("#feature-seek-at").value.trim(); if (v) api("POST", "/api/feature/seek", { position: v }); };
+  renderFeature();
+}

@@ -117,7 +117,8 @@ function renderCalendar() {
       if (!(s < d1 && f > d0)) continue;
       const a = Math.max(s, d0), b = Math.min(f, d1);
       const top = (a - d0) / 864e5 * 100, h = Math.max(1.2, (b - a) / 864e5 * 100);
-      const plName = o.playlist === "normal" ? "Normal playlist" : o.playlist === "black" ? "Black" : (SC.playlists[o.playlist] || {}).name || "?";
+      const plName = o.playlist === "normal" ? "Normal playlist" : o.playlist === "black" ? "Black"
+        : o.playlist === "feature" ? "Feature: " + mediaName(o.media) : (SC.playlists[o.playlist] || {}).name || "?";
       const on = sch.active && sch.active.id === o.id && sch.active.occ_start === o.occ_start;
       col.append(el("div", { class: "blk" + (on ? " on" : ""), title: `${o.title}\n${fmtTime(s)}–${fmtTime(f)} · ${plName}` +
           (o.repeat !== "none" ? ` · repeats ${o.repeat}` : "") + (o.takeover ? " · takes over" : ""),
@@ -146,7 +147,9 @@ function editEntry(e, start, end) {
   e = e || { title: "", playlist: Object.keys(SC.playlists)[0] || "normal", start: isoDT(start), end: isoDT(end),
     repeat: "none", days: [], until: "", color: "", takeover: false, enabled: true };
   const s = parseDT(e.start), f = parseDT(e.end);
-  const plOpts = [...Object.values(SC.playlists).map(p => [p.id, p.name]), ["normal", "Normal playlist"], ["black", "Black"]];
+  const plOpts = [...Object.values(SC.playlists).map(p => [p.id, p.name]), ["normal", "Normal playlist"], ["black", "Black"],
+    ["feature", "Feature screening (film)…"]];
+  const vids = S.media.filter(m => m.kind === "video");
   const daysBox = el("div", { class: "days-pick" }, ...DAY_NAMES.map((n, i) =>
     el("label", {}, el("input", { type: "checkbox", value: i, checked: (e.days || []).includes(i) }), n)));
   const d = el("dialog", {},
@@ -155,6 +158,9 @@ function editEntry(e, start, end) {
       el("label", { class: "field" }, el("span", {}, "Title"), el("input", { name: "title", value: e.title, placeholder: "e.g. Gala evening" })),
       el("label", { class: "field" }, el("span", {}, "Playlist"),
         el("select", { name: "playlist" }, ...plOpts.map(([v, l]) => el("option", { value: v, selected: v === e.playlist }, l)))),
+      el("label", { class: "field feature-pick" }, el("span", {}, "Feature (starts once at the start time; To is when the entry ends)"),
+        el("select", { name: "media" }, el("option", { value: "" }, "— choose a video —"),
+          ...vids.map(m => el("option", { value: m.id, selected: m.id === e.media }, m.name + (m.duration ? ` (${fmtDur(m.duration)})` : ""))))),
       el("div", { class: "row" },
         el("label", { class: "field" }, el("span", {}, "Date"), el("input", { type: "date", name: "date", value: isoDate(s), required: true })),
         el("label", { class: "field" }, el("span", {}, "From"), el("input", { type: "time", name: "from", value: fmtTime(s), required: true })),
@@ -176,13 +182,23 @@ function editEntry(e, start, end) {
   const f2 = d.querySelector("form");
   const syncDays = () => daysBox.classList.toggle("hidden", f2.repeat.value !== "weekly");
   f2.repeat.addEventListener("change", syncDays); syncDays();
+  // Feature entries: pick the film; the end time defaults to start + its running time
+  const syncFeature = () => $(".feature-pick", d).classList.toggle("hidden", f2.playlist.value !== "feature");
+  f2.playlist.addEventListener("change", syncFeature); syncFeature();
+  f2.media.addEventListener("change", () => {
+    const m = S.media.find(x => x.id === f2.media.value);
+    if (m && !f2.title.value) f2.title.value = m.name;
+    if (!m || !m.duration || !f2.from.value) return;
+    const st = parseDT(`${f2.date.value}T${f2.from.value}`);
+    f2.to.value = fmtTime(new Date(st.getTime() + Math.ceil(m.duration / 60 + 1) * 60000));
+  });
   d.addEventListener("close", async () => {
     try {
       if (d.returnValue === "save") {
         const st = parseDT(`${f2.date.value}T${f2.from.value}`);
         let en = parseDT(`${f2.date.value}T${f2.to.value}`);
         if (en <= st) en = addDays(en, 1);
-        const body = { title: f2.title.value, playlist: f2.playlist.value, start: isoDT(st), end: isoDT(en),
+        const body = { title: f2.title.value, playlist: f2.playlist.value, media: f2.media.value || null, start: isoDT(st), end: isoDT(en),
           repeat: f2.repeat.value, days: $$("input:checked", daysBox).map(c => Number(c.value)), until: f2.until.value || null,
           color: f2.color.value, takeover: f2.takeover.checked, enabled: f2.enabled.checked };
         await api(isNew ? "POST" : "PUT", isNew ? "/api/schedule" : "/api/schedule/" + e.id, body);

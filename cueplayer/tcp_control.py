@@ -10,12 +10,24 @@ One command per line, terminated by CR, LF or CRLF. Case-insensitive keywords.
     BLACK [FADE=ms]              -> OK ...
     NEXT                         -> OK ...
     STATUS                       -> STATUS mode=... cue=... media="..." ...
+    FEATURE <media> [START=s]    -> OK ...             start a feature (film); START=1:02:03 or seconds
+    FEATURE STOP [BLACK|HOLD]    -> OK ...             end it (then Normal playlist, or black/hold)
+    FEATURE RESUME | SEEK <t>    -> OK ...
+    FEATURE STATUS               -> FEATURE state=... pos=... dur=... remain=...
 
     opts: LOOP | HOLD | DURATION=<s> | AFTER=default|hold|black|cue:<n> | FADE=<ms>
 
 Replies start with OK, ERR or STATUS. TCP clients also receive unsolicited
 "EVENT mode=... cue=... media=..." lines whenever playback changes, which is
 handy for button feedback in Q-SYS.
+
+While a feature plays, TCP clients get a position line every feature.position_interval_s:
+
+    FEATURE state=playing pos=1834.2 dur=5400.0 remain=3565.8 progress=0.3397 media="Film" id=...
+
+and one with event=<name> on every change (started, waiting, interrupted, resumed, seek,
+finished, stopped). "FEATURE event=finished state=finished ..." is the cue for Q-SYS to
+switch back once the film has ended.
 """
 from __future__ import annotations
 
@@ -80,6 +92,24 @@ def status_line(st: Dict[str, Any], prefix: str = "STATUS") -> str:
         parts.append(f"elapsed={st['elapsed']:.1f}")
     if st.get("duration"):
         parts.append(f"duration={float(st['duration']):.1f}")
+    f = st.get("feature")
+    if f:
+        parts.append(f"feature={f.get('state')}")
+    return " ".join(parts)
+
+
+def feature_line(f: Optional[Dict[str, Any]], event: Optional[str] = None) -> str:
+    if not f:
+        return "FEATURE state=none"
+    m = f.get("media") or {}
+    parts = ["FEATURE"] + ([f"event={event}"] if event else []) + [
+        f"state={f.get('state')}", f"pos={float(f.get('position') or 0):.1f}"]
+    if f.get("duration"):
+        parts += [f"dur={float(f['duration']):.1f}", f"remain={float(f.get('remaining') or 0):.1f}",
+                  f"progress={float(f.get('progress') or 0):.4f}"]
+    parts += [f"media={q(m.get('name') or '')}", f"id={m.get('id') or ''}"]
+    if f.get("state") == "interrupted":
+        parts.append(f"by={q(f.get('interrupted_by') or '')}")
     return " ".join(parts)
 
 
@@ -234,12 +264,33 @@ def player_handler(ctrl) -> Handler:
                 flags = {a.upper() for a in args}
                 st = ctrl.test_pattern(name, "TONE" in flags, "NOLABEL" not in flags,
                                        force="FORCE" in flags)
+        elif cmd == "FEATURE":
+            sub = args[0].upper() if args else "STATUS"
+            if sub == "STATUS":
+                return feature_line(ctrl.feature_status())
+            if sub == "STOP":
+                flags = {a.upper() for a in args[1:]}
+                then = "black" if "BLACK" in flags else "hold" if "HOLD" in flags else None
+                st = ctrl.feature_stop(then, parse_opts(args[1:]).get("transition_ms"))
+            elif sub == "RESUME":
+                st = ctrl.feature_resume(bool(parse_opts(args[1:]).get("force")))
+            elif sub == "SEEK":
+                if len(args) < 2:
+                    return "ERR FEATURE SEEK needs a time (seconds or h:mm:ss)"
+                st = ctrl.feature_seek(args[1].split("=", 1)[-1])
+            else:
+                rest = args[1:] if sub == "PLAY" else args
+                if not rest:
+                    return "ERR FEATURE needs a media name or id"
+                start = next((a.split("=", 1)[1] for a in rest[1:] if a.upper().startswith(("START=", "AT="))), 0)
+                st = ctrl.play_feature(rest[0], start, "tcp", any(a.upper() == "FORCE" for a in rest[1:]))
+            return feature_line(st.get("feature")).replace("FEATURE", "OK FEATURE", 1)
         elif cmd == "NEXT":
             st = ctrl.next(bool(parse_opts(args).get("force")))
         elif cmd == "STATUS":
             return status_line(ctrl.status())
         elif cmd == "HELP":
-            return "OK commands: PING AUTH CUE PLAY PLAYLIST NORMAL BLACK NEXT TEST STATUS EVENTS ON|OFF (opts: LOOP HOLD FORCE)"
+            return "OK commands: PING AUTH CUE PLAY PLAYLIST FEATURE NORMAL BLACK NEXT TEST STATUS EVENTS ON|OFF (opts: LOOP HOLD FORCE)"
         else:
             return f"ERR unknown command {cmd}"
         return status_line(st, "OK")
@@ -249,6 +300,10 @@ def player_handler(ctrl) -> Handler:
 def player_event_line(msg: Dict[str, Any]) -> Optional[str]:
     if msg.get("event") == "error":
         return f"EVENT error={q(msg.get('error'))}"
+    if msg.get("event") == "feature":
+        return feature_line(msg.get("feature"), msg.get("feature_event"))
+    if msg.get("event") == "feature_position":
+        return feature_line(msg.get("feature"))
     if msg.get("event") in ("play", "black", "hold", "status", "started") and msg.get("status"):
         if msg["event"] == "started":
             return None

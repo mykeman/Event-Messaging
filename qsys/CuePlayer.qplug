@@ -8,11 +8,15 @@
 -- Buttons label and colour themselves from the unit's cue list (Scenario cues fill the
 -- Scenario buttons, Event cues fill the Event buttons, in cue-number order). Turn on
 -- "Manual" on the Setup page to type cue numbers per button instead.
+--
+-- Feature page (feature screening, connect to a Player): start / stop / resume a film,
+-- its position, remaining time and progress, and a "Feature Ended" trigger pin that fires
+-- once when the film finishes - wire it to whatever switches the venue back.
 
 PluginInfo = {
   Name = "CuePlayer~Event Signage",
-  Version = "1.0",
-  BuildVersion = "1.0.0.0",
+  Version = "1.1",
+  BuildVersion = "1.1.0.0",
   Id = "5283535a-bce9-4fd7-9247-04f4c7989b13",
   Author = "CuePlayer",
   Description = "Normal / scenario / event cue triggers with live feedback for CuePlayer signage",
@@ -27,7 +31,7 @@ function GetPrettyName(props)
   return "CuePlayer " .. PluginInfo.Version
 end
 
-PageNames = { "Control", "Setup" }
+PageNames = { "Control", "Feature", "Setup" }
 function GetPages(props)
   local pages = {}
   for ix, name in ipairs(PageNames) do
@@ -75,6 +79,24 @@ function GetControls(props)
     { Name = "Mode", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = true, PinStyle = "Output" },
     { Name = "ActiveCue", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = true, PinStyle = "Output" },
     { Name = "NowPlaying", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = true, PinStyle = "Output" },
+    -- feature screening
+    { Name = "FeatureMedia", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Both" },
+    { Name = "FeatureStart", ControlType = "Text", Count = 1, UserPin = true, PinStyle = "Both" },
+    { Name = "FeaturePlay", ControlType = "Button", ButtonType = "Momentary", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "FeatureStop", ControlType = "Button", ButtonType = "Momentary", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "FeatureResume", ControlType = "Button", ButtonType = "Momentary", Count = 1, UserPin = true, PinStyle = "Input" },
+    { Name = "FeaturePlaying", ControlType = "Indicator", IndicatorType = "Led", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "FeatureInterrupted", ControlType = "Indicator", IndicatorType = "Led", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "FeatureFinished", ControlType = "Indicator", IndicatorType = "Led", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "FeatureEnded", ControlType = "Button", ButtonType = "Trigger", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "FeatureState", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "FeatureTitle", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "FeaturePosition", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "FeatureRemaining", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "FeatureDuration", ControlType = "Indicator", IndicatorType = "Text", Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "FeatureSeconds", ControlType = "Knob", ControlUnit = "Integer", Min = 0, Max = 86400, Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "FeatureRemainingSeconds", ControlType = "Knob", ControlUnit = "Integer", Min = 0, Max = 86400, Count = 1, UserPin = true, PinStyle = "Output" },
+    { Name = "FeatureProgress", ControlType = "Knob", ControlUnit = "Percent", Min = 0, Max = 100, Count = 1, UserPin = true, PinStyle = "Output" },
   }
   if ns > 0 then
     table.insert(c, { Name = "Scenario", ControlType = "Button", ButtonType = "Momentary", Count = ns, UserPin = true, PinStyle = "Input" })
@@ -153,6 +175,41 @@ function GetControlLayout(props)
       box("Event content", 0, y, width, h)
       grid("Event", ne, 12, y + 22, { 30, 80, 160 })
     end
+  elseif page == "Feature" then
+    box("Feature screening", 0, 0, 420, 330)
+    label("Media (name or id)", 12, 22, 130, 24)
+    layout["FeatureMedia"] = { PrettyName = "Feature~Media", Style = "Text", Position = { 146, 22 }, Size = { 262, 24 }, FontSize = 12 }
+    label("Start at (h:mm:ss)", 12, 52, 130, 24)
+    layout["FeatureStart"] = { PrettyName = "Feature~Start At", Style = "Text", Position = { 146, 52 }, Size = { 100, 24 }, FontSize = 12 }
+    layout["FeaturePlay"] = { PrettyName = "Feature~Play", Style = "Button", Legend = "Play feature",
+      Position = { 12, 86 }, Size = { 124, 44 }, Color = { 109, 40, 217 }, FontSize = 13, CornerRadius = 6 }
+    layout["FeatureResume"] = { PrettyName = "Feature~Resume", Style = "Button", Legend = "Resume",
+      Position = { 146, 86 }, Size = { 124, 44 }, Color = { 22, 140, 70 }, FontSize = 13, CornerRadius = 6 }
+    layout["FeatureStop"] = { PrettyName = "Feature~Stop", Style = "Button", Legend = "Stop feature",
+      Position = { 284, 86 }, Size = { 124, 44 }, Color = { 150, 30, 30 }, FontSize = 13, CornerRadius = 6 }
+    local leds = { { "FeaturePlaying", "Playing", { 60, 255, 120 } }, { "FeatureInterrupted", "Interrupted", { 255, 170, 0 } },
+      { "FeatureFinished", "Finished", { 80, 160, 255 } } }
+    for i, l in ipairs(leds) do
+      local x = 12 + (i - 1) * 136
+      layout[l[1]] = { PrettyName = "Feature~" .. l[2], Style = "Led", Position = { x, 146 }, Size = { 16, 16 }, Color = l[3] }
+      label(l[2], x + 22, 142, 100, 24)
+    end
+    label("Ended (trigger)", 12, 174, 130, 24)
+    layout["FeatureEnded"] = { PrettyName = "Feature~Ended Trigger", Style = "Button", Legend = "Ended",
+      Position = { 146, 174 }, Size = { 80, 24 } }
+    label("State", 240, 174, 50, 24)
+    layout["FeatureState"] = { PrettyName = "Feature~State", Style = "Text", Position = { 290, 174 }, Size = { 118, 24 }, FontSize = 12 }
+    label("Title", 12, 204, 130, 24)
+    layout["FeatureTitle"] = { PrettyName = "Feature~Title", Style = "Text", Position = { 146, 204 }, Size = { 262, 24 }, FontSize = 12 }
+    label("Position / duration", 12, 234, 130, 24)
+    layout["FeaturePosition"] = { PrettyName = "Feature~Position", Style = "Text", Position = { 146, 234 }, Size = { 80, 24 }, FontSize = 12 }
+    layout["FeatureDuration"] = { PrettyName = "Feature~Duration", Style = "Text", Position = { 232, 234 }, Size = { 80, 24 }, FontSize = 12 }
+    label("Remaining", 12, 264, 130, 24)
+    layout["FeatureRemaining"] = { PrettyName = "Feature~Remaining", Style = "Text", Position = { 146, 264 }, Size = { 80, 24 }, FontSize = 12 }
+    layout["FeatureProgress"] = { PrettyName = "Feature~Progress", Style = "Meter", Position = { 232, 264 }, Size = { 176, 24 } }
+    label("Seconds in / left", 12, 294, 130, 24)
+    layout["FeatureSeconds"] = { PrettyName = "Feature~Position Seconds", Style = "Text", Position = { 146, 294 }, Size = { 80, 24 } }
+    layout["FeatureRemainingSeconds"] = { PrettyName = "Feature~Remaining Seconds", Style = "Text", Position = { 232, 294 }, Size = { 80, 24 } }
   else
     box("Connection", 0, 0, 420, 250)
     local rows = {
@@ -275,12 +332,41 @@ if Controls then
     return want == nil or want == kv.screen
   end
 
+  ---------------------------------------------------------------- feature screening
+  local function hms(sec)
+    sec = math.max(0, math.floor((tonumber(sec) or 0) + 0.5))
+    return string.format("%d:%02d:%02d", sec // 3600, (sec % 3600) // 60, sec % 60)
+  end
+
+  local featureState = nil
+  local function featureFeedback(kv)
+    local state = kv.state or "none"
+    Controls.FeatureState.String = state
+    Controls.FeaturePlaying.Boolean = (state == "playing")
+    Controls.FeatureInterrupted.Boolean = (state == "interrupted")
+    Controls.FeatureFinished.Boolean = (state == "finished")
+    Controls.FeatureTitle.String = kv.media or ""
+    local pos, dur, rem = tonumber(kv.pos) or 0, tonumber(kv.dur), tonumber(kv.remain)
+    Controls.FeaturePosition.String = hms(pos)
+    Controls.FeatureSeconds.Value = math.floor(pos)
+    Controls.FeatureDuration.String = dur and hms(dur) or ""
+    Controls.FeatureRemaining.String = rem and hms(rem) or ""
+    Controls.FeatureRemainingSeconds.Value = rem and math.floor(rem) or 0
+    Controls.FeatureProgress.Value = (tonumber(kv.progress) or 0) * 100
+    -- Fire the Ended trigger once, when the film finishes (not on reconnect)
+    if kv.event == "finished" and featureState ~= "finished" then
+      Controls.FeatureEnded:Trigger()
+    end
+    featureState = state
+  end
+
   sock.EventHandler = function(s, evt_, err)
     if evt_ == TcpSocket.Events.Connected then
       Controls.Connected.Boolean = true
       setStatus(0, "connected")
       if Controls.Token.String ~= "" then s:Write("AUTH " .. Controls.Token.String .. "\r\n") end
       s:Write("STATUS\r\n")
+      if not VIA_MASTER then s:Write("FEATURE STATUS\r\n") end
     elseif evt_ == TcpSocket.Events.Data then
       local line = s:ReadLine(TcpSocket.EOL.CrLf)
       while line do
@@ -288,6 +374,9 @@ if Controls then
         if line:match("^EVENT") or line:match("^STATUS") or line:match("^OK mode=") then
           local kv = parse(line)
           if kv.mode and wanted(kv) then feedback(kv) end
+        end
+        if line:match("^FEATURE") or line:match("^OK FEATURE") then
+          featureFeedback(parse(line))
         end
         if line:match("^ERR") then
           setStatus(1, line:sub(5))
@@ -387,6 +476,15 @@ if Controls then
   Controls.Normal.EventHandler = function(c) if c.Boolean then send(cmd("NORMAL")) end end
   Controls.Black.EventHandler = function(c) if c.Boolean then send(cmd("BLACK")) end end
   Controls.Next.EventHandler = function(c) if c.Boolean then send(cmd("NEXT")) end end
+  Controls.FeaturePlay.EventHandler = function(c)
+    if not c.Boolean then return end
+    local m = Controls.FeatureMedia.String
+    if m == "" then setStatus(1, "enter the feature's media name or id"); return end
+    local st = Controls.FeatureStart.String
+    send(cmd("FEATURE " .. quote(m) .. (st ~= "" and (" START=" .. st) or "")))
+  end
+  Controls.FeatureStop.EventHandler = function(c) if c.Boolean then send(cmd("FEATURE STOP")) end end
+  Controls.FeatureResume.EventHandler = function(c) if c.Boolean then send(cmd("FEATURE RESUME")) end end
   Controls.Refresh.EventHandler = refreshCues
   Controls.ManualMap.EventHandler = refreshCues
   for _, ctl in ipairs(scenCue) do ctl.EventHandler = refreshCues end
