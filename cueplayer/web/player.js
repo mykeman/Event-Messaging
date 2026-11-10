@@ -67,8 +67,6 @@ function renderStatus() {
   $("#st-ndi").textContent = eng.ndi || "—";
   $("#st-display").textContent = (eng.display || "—") + (eng.display_format ? " · " + eng.display_format : "");
   $("#st-audio").textContent = eng.audio || "—";
-  $("#st-display-warn").textContent = eng.display_warning ? "⚠ " + eng.display_warning : "";
-  $("#st-display-warn").classList.toggle("hidden", !eng.display_warning);
   $("#st-decoder").textContent = eng.video_decoder ? eng.video_decoder + (/^(avdec|vp8dec|vp9dec|dav1d|openh264)/.test(eng.video_decoder) ? " (software)" : " (hardware)") : "—";
   const dropped = eng.frames_dropped || 0;
   const f = eng.fps;
